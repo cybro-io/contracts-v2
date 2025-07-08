@@ -49,9 +49,33 @@ contract LPManager is Ownable, ReentrancyGuard {
         PoolTokens poolTokens;
     }
 
+    struct Position {
+        address token0;
+        address token1;
+        uint256 amount0;
+        uint256 amount1;
+        uint128 unclaimedFee0;
+        uint128 unclaimedFee1;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 price;
+    }
+
+    struct RawPositionData {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint128 liquidity;
+        uint128 tokensOwed0;
+        uint128 tokensOwed1;
+    }
+
     ///////////////////
     // State Variables
     ///////////////////
+    uint256 private constant BPS_DENOMINATOR = 10_000;
     uint32 private constant SECONDS_AGO = 0;
     uint256 private constant SQRT_PRICE_X96_DENOMINATOR = 2 ** 192;
 
@@ -308,6 +332,35 @@ contract LPManager is Ownable, ReentrancyGuard {
     }
 
     ///////////////////
+    // External View Functions
+    ///////////////////
+
+    function getPosition(uint256 positionId) external view returns (Position memory position) {
+        RawPositionData memory rawData = _getRawPositionData(positionId);
+        address pool = IUniswapV3Factory(i_factory).getPool(rawData.token0, rawData.token1, rawData.fee);
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        (uint256 amount0, uint256 amount1) =
+            LiquidityAmounts.getAmountsForLiquidity(
+                sqrtPriceX96,
+                TickMath.getSqrtRatioAtTick(rawData.tickLower),
+                TickMath.getSqrtRatioAtTick(rawData.tickUpper),
+                rawData.liquidity
+            );
+
+        position = Position({
+            token0: rawData.token0,
+            token1: rawData.token1,
+            amount0: amount0,
+            amount1: amount1,
+            unclaimedFee0: rawData.tokensOwed0,
+            unclaimedFee1: rawData.tokensOwed1,
+            tickLower: rawData.tickLower,
+            tickUpper: rawData.tickUpper,
+            price: _getPriceFromOracle(pool, rawData.token0, rawData.token1)
+        });
+    }
+
+    ///////////////////
     // Private Functions
     ///////////////////
     
@@ -514,6 +567,9 @@ contract LPManager is Ownable, ReentrancyGuard {
         _ensureAllowance(IERC20(poolTokens.token0), address(i_positionManager), amount0Desired);
         _ensureAllowance(IERC20(poolTokens.token1), address(i_positionManager), amount1Desired);
 
+        uint256 amount0Min = _getAmountOutMinimum(amount0Desired);
+        uint256 amount1Min = _getAmountOutMinimum(amount1Desired);
+
         // Mint the position NFT directly to the user
         INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
             token0: poolTokens.token0,
@@ -523,8 +579,8 @@ contract LPManager is Ownable, ReentrancyGuard {
             tickUpper: tickUpper,
             amount0Desired: amount0Desired,
             amount1Desired: amount1Desired,
-            amount0Min: 0,
-            amount1Min: 0,
+            amount0Min: amount0Min,
+            amount1Min: amount1Min,
             recipient: msg.sender,
             deadline: block.timestamp + i_swap_deadline_blocks
         });
@@ -576,7 +632,39 @@ contract LPManager is Ownable, ReentrancyGuard {
         price = numerator / denominator;
     }
 
+    ////////////////////////////
+    // Private View Functions
+    ////////////////////////////
+
+    function _getRawPositionData(uint256 positionId) private view returns (RawPositionData memory rawPositionData) {
+        (
+            ,
+            ,
+            address token0,
+            address token1,
+            uint24 fee,
+            int24 tickLower,
+            int24 tickUpper,
+            uint128 liquidity,
+            ,
+            ,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        ) = i_positionManager.positions(positionId);
+
+        rawPositionData = RawPositionData({
+            token0: token0,
+            token1: token1,
+            fee: fee,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            liquidity: liquidity,
+            tokensOwed0: tokensOwed0,
+            tokensOwed1: tokensOwed1
+        });
+    }
+
     function _getAmountOutMinimum(uint256 amount) private view returns (uint256) {
-        return (amount * (10_000 - s_slippageBps)) / 10_000;
+        return (amount * (BPS_DENOMINATOR - s_slippageBps)) / BPS_DENOMINATOR;
     }
 }
