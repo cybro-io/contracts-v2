@@ -168,8 +168,8 @@ contract LPManager is Ownable, ReentrancyGuard {
         (positionId, liquidity, amount0, amount1) = _openPosition(pool, balance0, balance1, tickLower, tickUpper, poolTokens);
         s_userPositions[msg.sender].push(positionId);
 
-        uint256 price = _getPriceFromOracle(pool, poolTokens.token0, poolTokens.token1);
-        emit PositionCreated(positionId, liquidity, amount0, amount1, tickLower, tickUpper, price);
+        // uint256 price = _getPriceFromOracle(pool, poolTokens.token0, poolTokens.token1);
+        // emit PositionCreated(positionId, liquidity, amount0, amount1, tickLower, tickUpper, price);
     }
 
     function claimFees(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
@@ -440,17 +440,14 @@ contract LPManager is Ownable, ReentrancyGuard {
         private
         returns (uint256 amount0, uint256 amount1)
     {
-        uint256 amount0Min = _getAmountOutMinimum(amount0Desired);
-        uint256 amount1Min = _getAmountOutMinimum(amount1Desired);
-
         // Call increaseLiquidity on the position NFT
         (, amount0, amount1) = i_positionManager.increaseLiquidity(
             INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: positionId,
                 amount0Desired: amount0Desired,
                 amount1Desired: amount1Desired,
-                amount0Min: amount0Min,
-                amount1Min: amount1Min,
+                amount0Min: 0,
+                amount1Min: 0,
                 deadline: block.timestamp + i_swap_deadline_blocks
             })
         );
@@ -544,11 +541,13 @@ contract LPManager is Ownable, ReentrancyGuard {
             sqrtPriceLimitX96: 0
         });
 
-        uint256 amountSwapped = i_swapRouter.exactInputSingle(params);
+        uint256 unswappedHalf = amountIn - (amountIn / 2);
+        uint256 swappedAmount = i_swapRouter.exactInputSingle(params);
+
         if (tokenIn == poolTokens.token0) {
-            return (amountIn / 2, amountSwapped);
-        } else if (tokenIn == poolTokens.token1) {
-            return (amountSwapped, amountIn / 2);
+            return (unswappedHalf, swappedAmount);
+        } else {
+            return (swappedAmount, unswappedHalf);
         }
     }
 
@@ -567,9 +566,6 @@ contract LPManager is Ownable, ReentrancyGuard {
         _ensureAllowance(IERC20(poolTokens.token0), address(i_positionManager), amount0Desired);
         _ensureAllowance(IERC20(poolTokens.token1), address(i_positionManager), amount1Desired);
 
-        uint256 amount0Min = _getAmountOutMinimum(amount0Desired);
-        uint256 amount1Min = _getAmountOutMinimum(amount1Desired);
-
         // Mint the position NFT directly to the user
         INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
             token0: poolTokens.token0,
@@ -579,8 +575,8 @@ contract LPManager is Ownable, ReentrancyGuard {
             tickUpper: tickUpper,
             amount0Desired: amount0Desired,
             amount1Desired: amount1Desired,
-            amount0Min: amount0Min,
-            amount1Min: amount1Min,
+            amount0Min: 0,
+            amount1Min: 0,
             recipient: msg.sender,
             deadline: block.timestamp + i_swap_deadline_blocks
         });
