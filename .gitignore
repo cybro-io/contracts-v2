@@ -12,6 +12,7 @@ out/
 
 # Docs
 docs/
+notes
 
 # Dotenv file
 .env

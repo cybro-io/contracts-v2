@@ -63,6 +63,8 @@ contract HelperConfig is Script {
         ERC20Mock wethMock = new ERC20Mock("WETH", "WETH", 18, msg.sender, 0);
         ERC20Mock wbtcMock = new ERC20Mock("WBTC", "WBTC", 8, msg.sender, 0);
         ERC20Mock usdcMock = new ERC20Mock("USDC", "USDC", 6, msg.sender, 0);
+        
+        swapRouter.setUp(address(wethMock), address(wbtcMock), address(usdcMock));
         vm.stopBroadcast();
 
         anvilNetworkConfig = NetworkConfig({

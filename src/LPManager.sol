@@ -72,6 +72,15 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint128 tokensOwed1;
     }
 
+    struct IncreaseLiquidityParams {
+        address pool;
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+    }
+
     ///////////////////
     // State Variables
     ///////////////////
@@ -156,16 +165,24 @@ contract LPManager is Ownable, ReentrancyGuard {
             revert LPManager__InvalidTokenIn({tokenIn: tokenIn, token0: poolTokens.token0, token1: poolTokens.token1});
         }
 
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
-        if (tickLower > currentTick || tickUpper < currentTick) {
-            revert LPManager__InvalidRange({currentTick: currentTick});
-        }
+        // (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        // if (tickLower > currentTick || tickUpper < currentTick) {
+        //     revert LPManager__InvalidRange({currentTick: currentTick});
+        // }
 
         // Swap half of tokenIn into the other token
         (uint256 balance0, uint256 balance1) = _prepareSwap(msg.sender, tokenIn, amountIn, poolTokens);
 
         // Mint position
-        (positionId, liquidity, amount0, amount1) = _openPosition(pool, balance0, balance1, tickLower, tickUpper, poolTokens);
+        IncreaseLiquidityParams memory params = IncreaseLiquidityParams({
+            pool: pool,
+            token0: poolTokens.token0,
+            token1: poolTokens.token1,
+            fee: poolTokens.fee,
+            tickLower: tickLower,
+            tickUpper: tickUpper
+        });
+        (positionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
         s_userPositions[msg.sender].push(positionId);
 
         // uint256 price = _getPriceFromOracle(pool, poolTokens.token0, poolTokens.token1);
@@ -201,9 +218,9 @@ contract LPManager is Ownable, ReentrancyGuard {
         emit ClaimedAllFees(tokenOut, amountTokenOut);
     }
 
-    function compoundFee(uint256 positionId) external isPositionOwner(positionId) returns (uint256 added0, uint256 added1) {
+    function compoundFees(uint256 positionId) external isPositionOwner(positionId) returns (uint256 added0, uint256 added1) {
         // Claim fees into LPManager contract
-        (,, address token0, address token1, ,,,,,,,) = i_positionManager.positions(positionId);
+        IncreaseLiquidityParams memory params = _getIncreaseLiquidityParams(positionId);
         INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
             tokenId: positionId,
             recipient: address(this),
@@ -213,7 +230,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         (uint256 amountToken0, uint256 amountToken1) = i_positionManager.collect(collectParams);
 
         // Call increase position liquidity
-        (added0, added1) = _increaseLiquidity(positionId, token0, token1, amountToken0, amountToken1);
+        (added0, added1) = _increaseLiquidity(positionId, amountToken0, amountToken1, params);
     }
 
     /// @notice Increase liquidity in an existing Uniswap V3 position from a single-token deposit
@@ -232,27 +249,27 @@ contract LPManager is Ownable, ReentrancyGuard {
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
         // Read position’s token0, token1 & fee from the NFT
-        (,, address token0, address token1, uint24 fee,,,,,,,) = i_positionManager.positions(positionId);
-        if (tokenIn != token0 && tokenIn != token1) {
-            revert LPManager__InvalidTokenIn(tokenIn, token0, token1);
+        IncreaseLiquidityParams memory params = _getIncreaseLiquidityParams(positionId);
+        if (tokenIn != params.token0 && tokenIn != params.token1) {
+            revert LPManager__InvalidTokenIn(tokenIn, params.token0, params.token1);
         }
 
         PoolTokens memory poolTokens = PoolTokens({
-            token0: token0,
-            token1: token1,
-            fee: fee
+            token0: params.token0,
+            token1: params.token1,
+            fee: params.fee
         });
 
         // Swap half of tokenIn into the other side
-        address tokenOut = tokenIn == token0 ? token1 : token0;
-        (uint256 amount0Desired, uint256 amount1Desired) = _swap(tokenIn, tokenOut, amountIn / 2, poolTokens);
+        address tokenOut = tokenIn == params.token0 ? params.token1 : params.token0;
+        (uint256 amount0, uint256 amount1) = _swap(tokenIn, tokenOut, amountIn / 2, poolTokens);
 
         // Approve the NonfungiblePositionManager to pull tokens
-        _ensureAllowance(IERC20(token0), address(i_positionManager), amount0Desired);
-        _ensureAllowance(IERC20(token1), address(i_positionManager), amount1Desired);
+        _ensureAllowance(IERC20(params.token0), address(i_positionManager), amount0);
+        _ensureAllowance(IERC20(params.token1), address(i_positionManager), amount1);
 
         // Call increaseLiquidity on the position NFT
-        (added0, added1) = _increaseLiquidity(positionId, token0, token1, amount0Desired, amount1Desired);
+        (added0, added1) = _increaseLiquidity(positionId, amount0, amount1, params);
     }
 
     /// @notice Move an existing position to a new price range, recycling all principal and fees
@@ -281,8 +298,17 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
         (uint256 balance0, uint256 balance1) = _rebalanceAmounts(rp);
 
+        IncreaseLiquidityParams memory params = IncreaseLiquidityParams({
+            pool: pool,
+            token0: poolTokens.token0,
+            token1: poolTokens.token1,
+            fee: poolTokens.fee,
+            tickLower: newLower,
+            tickUpper: newUpper
+        });
+
         uint128 liquidity;
-        (newPositionId, liquidity, amount0, amount1) = _openPosition(pool, balance0, balance1, newLower, newUpper, poolTokens);
+        (newPositionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
 
         emit RangeMoved(newPositionId, amount0, amount1);
     }
@@ -329,6 +355,12 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     function setSlippageBps(uint16 _slippageBps) external onlyOwner {
         s_slippageBps = _slippageBps;
+    }
+
+    /// @dev for test purpose to withdraw extra tokens in case _refundDust isn't working
+    function emergencyWithdraw(address token) external onlyOwner {
+        uint256 amount = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransfer(msg.sender, amount);
     }
 
     ///////////////////
@@ -409,7 +441,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     }
 
     function _rebalanceAmounts(RebalanceParams memory params)
-        internal
+        private
         returns (uint256 balance0, uint256 balance1)
     {
         (uint256 desired0, uint256 desired1) = _getRangeAmounts(
@@ -436,12 +468,18 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
-    function _increaseLiquidity(uint256 positionId, address token0, address token1, uint256 amount0Desired, uint256 amount1Desired)
+    function _increaseLiquidity(
+        uint256 positionId,
+        uint256 amount0,
+        uint256 amount1,
+        IncreaseLiquidityParams memory params
+    )
         private
-        returns (uint256 amount0, uint256 amount1)
+        returns (uint256 addedAmount0, uint256 addedAmount1)
     {
+        (uint256 amount0Desired, uint256 amount1Desired) = _getRangeAmounts(params.pool, amount0, amount1, params.tickLower, params.tickUpper);
         // Call increaseLiquidity on the position NFT
-        (, amount0, amount1) = i_positionManager.increaseLiquidity(
+        (, addedAmount0, addedAmount1) = i_positionManager.increaseLiquidity(
             INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: positionId,
                 amount0Desired: amount0Desired,
@@ -453,17 +491,17 @@ contract LPManager is Ownable, ReentrancyGuard {
         );
 
         // Refund any leftover “dust”
-        _refundDust(token0, token1, amount0, amount1, amount0Desired, amount1Desired);
+        _refundDust(params.token0, params.token1, addedAmount0, addedAmount1, amount0, amount1);
 
-        emit LiquidityIncreased(positionId, amount0, amount1);
+        emit LiquidityIncreased(positionId, addedAmount0, addedAmount1);
     }
 
-    function _refundDust(address token0, address token1, uint256 amount0, uint256 amount1, uint256 amount0Desired, uint256 amount1Desired) private {
-        if (amount0Desired > amount0) {
-            IERC20(token0).safeTransfer(msg.sender, amount0Desired - amount0);
+    function _refundDust(address token0, address token1, uint256 usedAmount0, uint256 usedAmount1, uint256 totalAmount0, uint256 totalAmount1) private {
+        if (totalAmount0 > usedAmount0) {
+            IERC20(token0).safeTransfer(msg.sender, totalAmount0 - usedAmount0);
         }
-        if (amount1Desired > amount1) {
-            IERC20(token1).safeTransfer(msg.sender, amount1Desired - amount1);
+        if (totalAmount1 > usedAmount1) {
+            IERC20(token1).safeTransfer(msg.sender, totalAmount1 - usedAmount1);
         }
     }
 
@@ -552,27 +590,24 @@ contract LPManager is Ownable, ReentrancyGuard {
     }
 
     function _openPosition(
-        address pool,
         uint256 balance0,
         uint256 balance1,
-        int24 tickLower, 
-        int24 tickUpper,
-        PoolTokens memory poolTokens
+        IncreaseLiquidityParams memory params
     ) private returns (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) {
         // Compute desired mint amounts
-        (uint256 amount0Desired, uint256 amount1Desired) = _getRangeAmounts(pool, balance0, balance1, tickLower, tickUpper);
+        (uint256 amount0Desired, uint256 amount1Desired) = _getRangeAmounts(params.pool, balance0, balance1, params.tickLower, params.tickUpper);
         
         // Approve PositionManager to pull both tokens
-        _ensureAllowance(IERC20(poolTokens.token0), address(i_positionManager), amount0Desired);
-        _ensureAllowance(IERC20(poolTokens.token1), address(i_positionManager), amount1Desired);
+        _ensureAllowance(IERC20(params.token0), address(i_positionManager), amount0Desired);
+        _ensureAllowance(IERC20(params.token1), address(i_positionManager), amount1Desired);
 
         // Mint the position NFT directly to the user
-        INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
-            token0: poolTokens.token0,
-            token1: poolTokens.token1,
-            fee: poolTokens.fee,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
+        INonfungiblePositionManager.MintParams memory mintParams = INonfungiblePositionManager.MintParams({
+            token0: params.token0,
+            token1: params.token1,
+            fee: params.fee,
+            tickLower: params.tickLower,
+            tickUpper: params.tickUpper,
             amount0Desired: amount0Desired,
             amount1Desired: amount1Desired,
             amount0Min: 0,
@@ -581,8 +616,8 @@ contract LPManager is Ownable, ReentrancyGuard {
             deadline: block.timestamp + i_swap_deadline_blocks
         });
 
-        (positionId, liquidity, amount0, amount1) = i_positionManager.mint(params);
-        _refundDust(poolTokens.token0, poolTokens.token1, amount0, amount1, amount0Desired, amount1Desired);
+        (positionId, liquidity, amount0, amount1) = i_positionManager.mint(mintParams);
+        _refundDust(params.token0, params.token1, amount0, amount1, balance0, balance1);
     }
 
     function _ensureAllowance(IERC20 token, address spender, uint256 amount) private {
@@ -590,14 +625,6 @@ contract LPManager is Ownable, ReentrancyGuard {
         if (current < amount) {
             token.forceApprove(spender, type(uint256).max);
         }
-    }
-
-    function _getRangeAmounts(address pool, uint256 amount0, uint256 amount1, int24 lowerTick, int24 upperTick) private view returns (uint256 amount0Desired, uint256 amount1Desired) {
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        uint160 sqrtA = TickMath.getSqrtRatioAtTick(lowerTick);
-        uint160 sqrtB = TickMath.getSqrtRatioAtTick(upperTick);
-        uint128 optLiq = LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtA, sqrtB, amount0, amount1);
-        (amount0Desired, amount1Desired) = LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, sqrtA, sqrtB, optLiq);
     }
 
     function _getExpectedOutput(
@@ -615,6 +642,31 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
+    ////////////////////////////
+    // Private View Functions
+    ////////////////////////////
+
+    function _getRangeAmounts(address pool, uint256 amount0, uint256 amount1, int24 lowerTick, int24 upperTick) private view returns (uint256 amount0Desired, uint256 amount1Desired) {
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        uint160 sqrtA = TickMath.getSqrtRatioAtTick(lowerTick);
+        uint160 sqrtB = TickMath.getSqrtRatioAtTick(upperTick);
+        uint128 optLiq = LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtA, sqrtB, amount0, amount1);
+        (amount0Desired, amount1Desired) = LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, sqrtA, sqrtB, optLiq);
+    }
+
+    function _getIncreaseLiquidityParams(uint256 positionId) private view returns (IncreaseLiquidityParams memory params) {
+        (,, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper,,,,,) = i_positionManager.positions(positionId);
+        address pool = IUniswapV3Factory(i_factory).getPool(token0, token1, fee);
+        params = IncreaseLiquidityParams({
+            pool: pool,
+            token0: token0,
+            token1: token1,
+            fee: fee,
+            tickLower: tickLower,
+            tickUpper: tickUpper
+        });
+    }
+
     function _getPriceFromOracle(address pool, address token0, address token1) private view returns (uint256 price) {
         (int24 arithmeticMeanTick,) = OracleLibrary.consult(pool, SECONDS_AGO);
         uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(arithmeticMeanTick);
@@ -627,10 +679,6 @@ contract LPManager is Ownable, ReentrancyGuard {
     
         price = numerator / denominator;
     }
-
-    ////////////////////////////
-    // Private View Functions
-    ////////////////////////////
 
     function _getRawPositionData(uint256 positionId) private view returns (RawPositionData memory rawPositionData) {
         (
