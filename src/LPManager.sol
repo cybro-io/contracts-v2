@@ -9,6 +9,7 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
+import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
@@ -312,7 +313,7 @@ contract LPManager is Ownable, ReentrancyGuard {
 
         uint128 liquidity;
         (newPositionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
-
+        s_userPositions[msg.sender].push(newPositionId);
         emit RangeMoved(newPositionId, amount0, amount1);
     }
 
@@ -644,34 +645,75 @@ contract LPManager is Ownable, ReentrancyGuard {
                 amountIn: amountIn,
                 sqrtPriceLimitX96: 0
             })
-        ) returns (uint256 amountOut, uint160, uint32, uint256) {
-            if (amountOut == 0) {
-                revert LPManager__InvalidQuoteAmount();
+        ) returns (
+            uint256 amountOut,
+            uint160,
+            uint32,
+            uint256
+        ) {
+            if (amountOut > 0) {
+                return amountOut;
             }
-            return amountOut;
+            // If quoter returns 0, fall through to manual calculation
         } catch {
-            // Fallback: Calculate expected output using pool's sqrtPriceX96
-            address pool = IUniswapV3Factory(i_factory).getPool(tokenIn, tokenOut, fee);
-            if (pool == address(0)) {
-                revert LPManager__InvalidPool();
-            }
-            (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-            
-            // Adjust for token order (token0 < token1)
-            bool isToken0 = tokenIn < tokenOut;
-            uint256 amountOut;
-            if (isToken0) {
-                // tokenIn = token0, use sqrtPriceX96 directly
-                amountOut = (amountIn * uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 96;
-            } else {
-                // tokenIn = token1, use inverse price
-                amountOut = (amountIn << 96) / (uint256(sqrtPriceX96) * uint256(sqrtPriceX96));
-            }
-            if (amountOut == 0) {
-                revert LPManager__InvalidPrice();
-            }
-            return amountOut;
+            // Quoter failed, fall through to manual calculation
         }
+        
+        // Manual calculation fallback
+        return _calculateManually(tokenIn, tokenOut, fee, amountIn);
+    }
+
+    function _calculateManually(
+        address tokenIn,
+        address tokenOut,
+        uint24 fee,
+        uint256 amountIn
+    ) private view returns (uint256 expectedOut) {
+        address pool = IUniswapV3Factory(i_factory).getPool(tokenIn, tokenOut, fee);
+        if (pool == address(0)) {
+            revert LPManager__InvalidPool();
+        }
+        
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        
+        // Get decimals for proper conversion
+        uint8 decimalsIn = IERC20Metadata(tokenIn).decimals();
+        uint8 decimalsOut = IERC20Metadata(tokenOut).decimals();
+        
+        // Apply fee: amountIn after fee = amountIn * (1e6 - fee) / 1e6
+        uint256 amountInAfterFee = (amountIn * (1e6 - fee)) / 1e6;
+        
+        // Determine token order
+        bool isToken0 = tokenIn < tokenOut;
+        
+        if (isToken0) {
+            // Converting token0 to token1
+            expectedOut = FullMath.mulDiv(
+                amountInAfterFee,
+                uint256(sqrtPriceX96) * uint256(sqrtPriceX96),
+                1 << 192
+            );
+        } else {
+            // Converting token1 to token0
+            expectedOut = FullMath.mulDiv(
+                amountInAfterFee,
+                1 << 192,
+                uint256(sqrtPriceX96) * uint256(sqrtPriceX96)
+            );
+        }
+        
+        // Adjust for decimal differences
+        if (decimalsIn > decimalsOut) {
+            expectedOut = expectedOut / (10 ** (decimalsIn - decimalsOut));
+        } else if (decimalsOut > decimalsIn) {
+            expectedOut = expectedOut * (10 ** (decimalsOut - decimalsIn));
+        }
+        
+        if (expectedOut == 0) {
+            revert LPManager__InvalidPrice();
+        }
+        
+        return expectedOut;
     }
 
     ////////////////////////////
