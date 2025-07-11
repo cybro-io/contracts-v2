@@ -12,7 +12,7 @@ import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
-import {IQuoter} from "@uniswap/v3-periphery/contracts/interfaces/IQuoter.sol";
+import {IQuoterV2} from "@uniswap/v3-periphery/contracts/interfaces/IQuoterV2.sol";
 import {PoolAddress} from "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import {OracleLibrary} from "@uniswap/v3-periphery/contracts/libraries/OracleLibrary.sol";
 
@@ -29,6 +29,9 @@ contract LPManager is Ownable, ReentrancyGuard {
     error LPManager__NoPositions(address user);
     error LPManager__InvalidOwnership(uint256 positionId, address user);
     error LPManager__InvalidRange(int24 currentTick);
+    error LPManager__InvalidQuoteAmount();
+    error LPManager__InvalidPool();
+    error LPManager__InvalidPrice();
 
     ///////////////////
     // Types
@@ -90,7 +93,7 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     INonfungiblePositionManager public immutable i_positionManager;
     ISwapRouter public immutable i_swapRouter;
-    IQuoter public immutable i_quoter;
+    IQuoterV2 public immutable i_quoter;
 
     address public immutable i_factory;
     uint256 public immutable i_swap_deadline_blocks;
@@ -130,7 +133,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     constructor(address _positionManager, address _swapRouter, address _factory, address _quoter, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
         i_positionManager = INonfungiblePositionManager(_positionManager);
         i_swapRouter = ISwapRouter(_swapRouter);
-        i_quoter = IQuoter(_quoter);
+        i_quoter = IQuoterV2(_quoter);
         i_factory = _factory;
         i_swap_deadline_blocks = swapDeadlineBlocks;
     }
@@ -633,12 +636,41 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint24 fee,
         uint256 amountIn
     ) private returns (uint256 expectedOut) {
-        bytes memory path = abi.encodePacked(tokenIn, fee, tokenOut);
-        
-        try i_quoter.quoteExactInput(path, amountIn) returns (uint256 amountOut) {
-            expectedOut = amountOut;
+        try i_quoter.quoteExactInputSingle(
+            IQuoterV2.QuoteExactInputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                fee: fee,
+                amountIn: amountIn,
+                sqrtPriceLimitX96: 0
+            })
+        ) returns (uint256 amountOut, uint160, uint32, uint256) {
+            if (amountOut == 0) {
+                revert LPManager__InvalidQuoteAmount();
+            }
+            return amountOut;
         } catch {
-            expectedOut = 0;
+            // Fallback: Calculate expected output using pool's sqrtPriceX96
+            address pool = IUniswapV3Factory(i_factory).getPool(tokenIn, tokenOut, fee);
+            if (pool == address(0)) {
+                revert LPManager__InvalidPool();
+            }
+            (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+            
+            // Adjust for token order (token0 < token1)
+            bool isToken0 = tokenIn < tokenOut;
+            uint256 amountOut;
+            if (isToken0) {
+                // tokenIn = token0, use sqrtPriceX96 directly
+                amountOut = (amountIn * uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 96;
+            } else {
+                // tokenIn = token1, use inverse price
+                amountOut = (amountIn << 96) / (uint256(sqrtPriceX96) * uint256(sqrtPriceX96));
+            }
+            if (amountOut == 0) {
+                revert LPManager__InvalidPrice();
+            }
+            return amountOut;
         }
     }
 
