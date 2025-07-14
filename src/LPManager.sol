@@ -89,7 +89,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     // State Variables
     ///////////////////
     uint256 private constant BPS_DENOMINATOR = 10_000;
-    uint32 private constant SECONDS_AGO = 0;
+    uint32 private constant SECONDS_AGO = 180;
     uint256 private constant SQRT_PRICE_X96_DENOMINATOR = 2 ** 192;
 
     INonfungiblePositionManager public immutable i_positionManager;
@@ -106,7 +106,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     // Events
     ///////////////////
 
-    event PositionCreated(uint256 indexed positionId, uint128 liquidity, uint256 amount0, uint256 amount1, int24 tickLower, int24 tickUpper, uint256 price);
+    event PositionCreated(uint256 indexed positionId, uint256 amount0, uint256 amount1, int24 tickLower, int24 tickUpper, uint256 price);
     event ClaimedFees(uint256 indexed positionId, address indexed token, uint256 amount);
     event ClaimedAllFees(address indexed token, uint256 amount);
     event LiquidityIncreased(uint256 indexed positionId, uint256 amountToken0, uint256 amountToken1);
@@ -169,10 +169,10 @@ contract LPManager is Ownable, ReentrancyGuard {
             revert LPManager__InvalidTokenIn({tokenIn: tokenIn, token0: poolTokens.token0, token1: poolTokens.token1});
         }
 
-        // (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
-        // if (tickLower > currentTick || tickUpper < currentTick) {
-        //     revert LPManager__InvalidRange({currentTick: currentTick});
-        // }
+        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        if (tickLower > currentTick || tickUpper < currentTick) {
+            revert LPManager__InvalidRange({currentTick: currentTick});
+        }
 
         // Swap half of tokenIn into the other token
         (uint256 balance0, uint256 balance1) = _prepareSwap(msg.sender, tokenIn, amountIn, poolTokens);
@@ -189,8 +189,8 @@ contract LPManager is Ownable, ReentrancyGuard {
         (positionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
         s_userPositions[msg.sender].push(positionId);
 
-        // uint256 price = _getPriceFromOracle(pool, poolTokens.token0, poolTokens.token1);
-        // emit PositionCreated(positionId, liquidity, amount0, amount1, tickLower, tickUpper, price);
+        uint256 price = _getPriceFromPool(pool, poolTokens.token0, poolTokens.token1);
+        emit PositionCreated(positionId, amount0, amount1, tickLower, tickUpper, price);
     }
 
     function claimFees(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
@@ -199,27 +199,6 @@ contract LPManager is Ownable, ReentrancyGuard {
         IERC20(tokenOut).safeTransfer(msg.sender, amountTokenOut);
 
         emit ClaimedFees(positionId, tokenOut, amountTokenOut);
-    }
-
-    /// @notice Harvest all fees from the caller’s positions, swap into `tokenOut` and send to caller
-    /// @param tokenOut The token in which the caller wants to receive all fees
-    function claimAllPositionsFees(address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
-        uint256[] storage positions = s_userPositions[msg.sender];
-        if (positions.length == 0) {
-            revert LPManager__NoPositions({user: msg.sender});
-        }
-
-        amountTokenOut = 0;
-        for (uint256 i = 0; i < positions.length; i++) {
-            uint256 positionId = positions[i];
-
-            uint256 _amount = _claimFees(positionId, tokenOut);
-            amountTokenOut += _amount;
-        }
-
-        IERC20(tokenOut).safeTransfer(msg.sender, amountTokenOut);
-
-        emit ClaimedAllFees(tokenOut, amountTokenOut);
     }
 
     function compoundFees(uint256 positionId) external isPositionOwner(positionId) returns (uint256 added0, uint256 added1) {
@@ -310,6 +289,7 @@ contract LPManager is Ownable, ReentrancyGuard {
             tickLower: newLower,
             tickUpper: newUpper
         });
+        // todo: add swap into right proportions
 
         uint128 liquidity;
         (newPositionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
@@ -392,7 +372,7 @@ contract LPManager is Ownable, ReentrancyGuard {
             unclaimedFee1: rawData.tokensOwed1,
             tickLower: rawData.tickLower,
             tickUpper: rawData.tickUpper,
-            price: _getPriceFromOracle(pool, rawData.token0, rawData.token1)
+            price: _getPriceFromPool(pool, rawData.token0, rawData.token1)
         });
     }
 
@@ -481,7 +461,21 @@ contract LPManager is Ownable, ReentrancyGuard {
         private
         returns (uint256 addedAmount0, uint256 addedAmount1)
     {
-        (uint256 amount0Desired, uint256 amount1Desired) = _getRangeAmounts(params.pool, amount0, amount1, params.tickLower, params.tickUpper);
+        // rebalance amounts to match position proportions
+        RebalanceParams memory rebalanceParams = RebalanceParams({
+            pool: params.pool,
+            amount0: amount0,
+            amount1: amount1,
+            newLower: params.tickLower,
+            newUpper: params.tickUpper,
+            poolTokens: PoolTokens({
+                token0: params.token0,
+                token1: params.token1,
+                fee: params.fee
+            })
+        });
+        (uint256 amount0Desired, uint256 amount1Desired) = _rebalanceAmounts(rebalanceParams);
+
         // Call increaseLiquidity on the position NFT
         (, addedAmount0, addedAmount1) = i_positionManager.increaseLiquidity(
             INonfungiblePositionManager.IncreaseLiquidityParams({
@@ -660,10 +654,10 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
         
         // Manual calculation fallback
-        return _calculateManually(tokenIn, tokenOut, fee, amountIn);
+        return _calculateExpectedOutputManually(tokenIn, tokenOut, fee, amountIn);
     }
 
-    function _calculateManually(
+    function _calculateExpectedOutputManually(
         address tokenIn,
         address tokenOut,
         uint24 fee,
@@ -741,9 +735,9 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
     }
 
-    function _getPriceFromOracle(address pool, address token0, address token1) private view returns (uint256 price) {
-        (int24 arithmeticMeanTick,) = OracleLibrary.consult(pool, SECONDS_AGO);
-        uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(arithmeticMeanTick);
+    function _getPriceFromPool(address pool, address token0, address token1) private view returns (uint256 price) {
+        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(currentTick);
         
         uint8 decimals0 = IERC20Metadata(token0).decimals();
         uint8 decimals1 = IERC20Metadata(token1).decimals();

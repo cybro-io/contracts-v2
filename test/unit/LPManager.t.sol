@@ -143,38 +143,6 @@ contract LPManagerTest is Test {
         vm.stopPrank();
     }
 
-    function testClaimAllPositionsFees() public mintWeth(user1) mintWbtc(user1) {
-        vm.startPrank(user1);
-        int24 wethTickLower = 2250;
-        int24 wethTickUpper = 2750;
-
-        int24 wbtcTickLower = 99500;
-        int24 wbtcTickUpper = 100500;
-
-        LPManagerInstance.createPosition(
-            wethUsdcPool, weth, STARTING_WETH_BALANCE, wethTickLower, wethTickUpper
-        );
-        LPManagerInstance.createPosition(
-            wbtcUsdcPool, wbtc, STARTING_WBTC_BALANCE, wbtcTickLower, wbtcTickUpper
-        );
-
-        uint256 amountTokenOut = LPManagerInstance.claimAllPositionsFees(weth);
-
-        uint256 expectedWethUsdcPoolFees = (STARTING_WETH_BALANCE / 2) / 10 + (STARTING_WETH_BALANCE / 2) / 10;
-        uint256 expectedWbtcUsdcPoolFees = (STARTING_WBTC_BALANCE / 2) / 10 + (STARTING_WBTC_BALANCE / 2) / 10;
-
-        assertEq(amountTokenOut, expectedWethUsdcPoolFees + expectedWbtcUsdcPoolFees);
-        vm.stopPrank();
-    }
-
-    function testClaimAllPositionsFeesNoPositions() public {
-        vm.startPrank(user1);
-
-        vm.expectRevert();
-        LPManagerInstance.claimAllPositionsFees(weth);
-        vm.stopPrank();
-    }
-
     function testCompoundFee() public mintWeth(user1) {
         vm.startPrank(user1);
         int24 wethTickLower = 2250;
