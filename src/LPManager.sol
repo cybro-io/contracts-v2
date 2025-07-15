@@ -16,7 +16,7 @@ import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRoute
 import {IQuoterV2} from "@uniswap/v3-periphery/contracts/interfaces/IQuoterV2.sol";
 import {PoolAddress} from "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import {OracleLibrary} from "@uniswap/v3-periphery/contracts/libraries/OracleLibrary.sol";
-import {FeeCollector} from "./FeeCollector.sol";
+import {ProtocolFeeCollector} from "./ProtocolFeeCollector.sol";
 
 
 using SafeERC20 for IERC20;
@@ -97,7 +97,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     ISwapRouter public immutable i_swapRouter;
     IQuoterV2 public immutable i_quoter;
     
-    address public immutable i_feeCollector;
+    address public immutable i_protocolFeeCollector;
     address public immutable i_factory;
     uint256 public immutable i_swap_deadline_blocks;
 
@@ -133,11 +133,11 @@ contract LPManager is Ownable, ReentrancyGuard {
     // Functions
     ///////////////////
 
-    constructor(address _positionManager, address _swapRouter, address _factory, address _quoter, address _feeCollector, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
+    constructor(address _positionManager, address _swapRouter, address _factory, address _quoter, address _protocolFeeCollector, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
         i_positionManager = INonfungiblePositionManager(_positionManager);
         i_swapRouter = ISwapRouter(_swapRouter);
         i_quoter = IQuoterV2(_quoter);
-        i_feeCollector = _feeCollector;
+        i_protocolFeeCollector = _protocolFeeCollector;
         i_factory = _factory;
         i_swap_deadline_blocks = swapDeadlineBlocks;
     }
@@ -178,7 +178,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
 
         // Swap half of tokenIn into the other token
-        (uint256 balance0, uint256 balance1) = _prepareSwap(msg.sender, tokenIn, amountIn, poolTokens);
+        (uint256 balance0, uint256 balance1) = _prepareSwap(tokenIn, amountIn, poolTokens);
 
         // Mint position
         IncreaseLiquidityParams memory params = IncreaseLiquidityParams({
@@ -198,9 +198,8 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     function claimFees(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
         amountTokenOut = _claimFees(positionId, tokenOut);
-
+        amountTokenOut = _collectFeesProtocolFee(tokenOut, amountTokenOut);
         IERC20(tokenOut).safeTransfer(msg.sender, amountTokenOut);
-
         emit ClaimedFees(positionId, tokenOut, amountTokenOut);
     }
 
@@ -214,6 +213,9 @@ contract LPManager is Ownable, ReentrancyGuard {
             amount1Max: type(uint128).max
         });
         (uint256 amountToken0, uint256 amountToken1) = i_positionManager.collect(collectParams);
+
+        amountToken0 = _collectFeesProtocolFee(params.token0, amountToken0);
+        amountToken1 = _collectFeesProtocolFee(params.token1, amountToken1);
 
         // Call increase position liquidity
         (added0, added1) = _increaseLiquidity(positionId, amountToken0, amountToken1, params);
@@ -231,14 +233,15 @@ contract LPManager is Ownable, ReentrancyGuard {
         nonReentrant
         returns (uint256 added0, uint256 added1)
     {
-        // Pull in the deposit token
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
-
         // Read position’s token0, token1 & fee from the NFT
         IncreaseLiquidityParams memory params = _getIncreaseLiquidityParams(positionId);
         if (tokenIn != params.token0 && tokenIn != params.token1) {
             revert LPManager__InvalidTokenIn(tokenIn, params.token0, params.token1);
         }
+
+        // Pull in the deposit token
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+        amountIn = _collectDepositProtocolFee(tokenIn, amountIn);
 
         PoolTokens memory poolTokens = PoolTokens({
             token0: params.token0,
@@ -274,6 +277,9 @@ contract LPManager is Ownable, ReentrancyGuard {
         PoolTokens memory poolTokens;
         (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId);
 
+        amount0 = _collectLiquidityProtocolFee(poolTokens.token0, amount0);
+        amount1 = _collectLiquidityProtocolFee(poolTokens.token1, amount1);
+
         RebalanceParams memory rp = RebalanceParams({
             pool: pool,
             newLower: newLower,
@@ -292,7 +298,6 @@ contract LPManager is Ownable, ReentrancyGuard {
             tickLower: newLower,
             tickUpper: newUpper
         });
-        // todo: add swap into right proportions
 
         uint128 liquidity;
         (newPositionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
@@ -336,6 +341,7 @@ contract LPManager is Ownable, ReentrancyGuard {
             }
         }
 
+        totalOut = _collectLiquidityProtocolFee(tokenOut, totalOut);
         IERC20(tokenOut).safeTransfer(msg.sender, totalOut);
         emit Withdrawn(positionId, tokenOut, totalOut);
     }
@@ -551,13 +557,13 @@ contract LPManager is Ownable, ReentrancyGuard {
     }
 
     function _prepareSwap(
-        address sender,
         address tokenIn,
         uint256 amountIn,
         PoolTokens memory poolTokens
     ) private returns (uint256 balance0, uint256 balance1) {
         address tokenOut = tokenIn == poolTokens.token0 ? poolTokens.token1 : poolTokens.token0;
-        IERC20(tokenIn).safeTransferFrom(sender, address(this), amountIn);
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+        amountIn = _collectDepositProtocolFee(tokenIn, amountIn);
         (balance0, balance1) = _swap(tokenIn, tokenOut, amountIn / 2, poolTokens);
     }
 
@@ -711,6 +717,24 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
         
         return expectedOut;
+    }
+
+    function _collectDepositProtocolFee(address token, uint256 amount) private returns (uint256) {
+        uint256 depositProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateDepositProtocolFee(amount);
+        IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, depositProtocolFee);
+        return amount - depositProtocolFee;
+    }
+
+    function _collectFeesProtocolFee(address token, uint256 amount) private returns (uint256) {
+        uint256 feesProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateFeesProtocolFee(amount);
+        IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, feesProtocolFee);
+        return amount - feesProtocolFee;
+    }
+
+    function _collectLiquidityProtocolFee(address token, uint256 amount) private returns (uint256) {
+        uint256 liquidityProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateLiquidityProtocolFee(amount);
+        IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, liquidityProtocolFee);
+        return amount - liquidityProtocolFee;
     }
 
     ////////////////////////////
