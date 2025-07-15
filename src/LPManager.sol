@@ -16,6 +16,7 @@ import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRoute
 import {IQuoterV2} from "@uniswap/v3-periphery/contracts/interfaces/IQuoterV2.sol";
 import {PoolAddress} from "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
 import {OracleLibrary} from "@uniswap/v3-periphery/contracts/libraries/OracleLibrary.sol";
+import {FeeCollector} from "./FeeCollector.sol";
 
 
 using SafeERC20 for IERC20;
@@ -95,7 +96,8 @@ contract LPManager is Ownable, ReentrancyGuard {
     INonfungiblePositionManager public immutable i_positionManager;
     ISwapRouter public immutable i_swapRouter;
     IQuoterV2 public immutable i_quoter;
-
+    
+    address public immutable i_feeCollector;
     address public immutable i_factory;
     uint256 public immutable i_swap_deadline_blocks;
 
@@ -131,10 +133,11 @@ contract LPManager is Ownable, ReentrancyGuard {
     // Functions
     ///////////////////
 
-    constructor(address _positionManager, address _swapRouter, address _factory, address _quoter, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
+    constructor(address _positionManager, address _swapRouter, address _factory, address _quoter, address _feeCollector, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
         i_positionManager = INonfungiblePositionManager(_positionManager);
         i_swapRouter = ISwapRouter(_swapRouter);
         i_quoter = IQuoterV2(_quoter);
+        i_feeCollector = _feeCollector;
         i_factory = _factory;
         i_swap_deadline_blocks = swapDeadlineBlocks;
     }

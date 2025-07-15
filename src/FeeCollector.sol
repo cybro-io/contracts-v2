@@ -26,7 +26,6 @@ contract FeeCollector is Ownable {
     // State Variables
     ///////////////////
     uint256 private constant BASIS_POINTS = 10000;
-    address public immutable i_lpManager;
     uint256 public s_liquidityFee;
     uint256 public s_feesFee;
     uint256 public s_depositFee;
@@ -44,44 +43,15 @@ contract FeeCollector is Ownable {
     // Functions
     ///////////////////
 
-    constructor(address _lpManager, uint256 _liquidityFee, uint256 _feesFee, uint256 _depositFee) Ownable(msg.sender) {
-        i_lpManager = _lpManager;
+    constructor(uint256 _liquidityFee, uint256 _feesFee, uint256 _depositFee) Ownable(msg.sender) {
         s_liquidityFee = _liquidityFee;
         s_feesFee = _feesFee;
         s_depositFee = _depositFee;
     }
 
-    /// @notice Calculate fee from liquidity amount
-    function calculateLiquidityFee(uint128 liquidity) external view returns (uint256) {
-        return (uint256(liquidity) * s_liquidityFee) / BASIS_POINTS;
-    }
-    
-    /// @notice Calculate fee from collected LP fees
-    function calculateFeesFee(uint256 collectedAmount) external view returns (uint256) {
-        return (collectedAmount * s_feesFee) / BASIS_POINTS;
-    }
-    
-    /// @notice Calculate fee from deposit amount
-    function calculateDepositFee(uint256 depositAmount) external view returns (uint256) {
-        return (depositAmount * s_depositFee) / BASIS_POINTS;
-    }
-
-    /// @notice Track ETH fees received
-    receive() external payable {
-        s_accumulatedFees[address(0)] += msg.value;
-        emit FeeReceived(address(0), msg.value);
-    }
-    
-    /// @notice Track ERC20 fees - must be called after transfer
-    /// @dev LPManager calls this after transferring tokens
-    /// @dev could be called only by LPManager
-    function trackFee(address token, uint256 amount) external {
-        if (msg.sender != i_lpManager) {
-            revert FeeCollector__PermissionDenied();
-        }
-        s_accumulatedFees[token] += amount;
-        emit FeeReceived(token, amount);
-    }
+    ///////////////////
+    // External Functions
+    ///////////////////
 
     /// @notice set all three types of fees at once
     function setFees(
@@ -120,5 +90,36 @@ contract FeeCollector is Ownable {
         s_accumulatedFees[tokenOut] -= amountTokenOut;
         IERC20(tokenOut).safeTransfer(recipient, amountTokenOut);
         emit FeeWithdrawn(tokenOut, recipient, amountTokenOut);
+    }
+
+    /// @notice receive ETH fees
+    receive() external payable {}
+
+    /////////////////////////////
+    // External View Functions
+    /////////////////////////////
+
+    /// @notice Get accumulated fees for a token
+    /// @param token Token address (use address(0) for ETH)
+    function getAccumulatedFees(address token) external view returns (uint256) {
+        if (token == address(0)) {
+            return address(this).balance;
+        }
+        return IERC20(token).balanceOf(address(this));
+    }
+
+    /// @notice Calculate fee from liquidity amount
+    function calculateLiquidityFee(uint128 liquidity) external view returns (uint256) {
+        return (uint256(liquidity) * s_liquidityFee) / BASIS_POINTS;
+    }
+    
+    /// @notice Calculate fee from collected LP fees
+    function calculateFeesFee(uint256 collectedAmount) external view returns (uint256) {
+        return (collectedAmount * s_feesFee) / BASIS_POINTS;
+    }
+    
+    /// @notice Calculate fee from deposit amount
+    function calculateDepositFee(uint256 depositAmount) external view returns (uint256) {
+        return (depositAmount * s_depositFee) / BASIS_POINTS;
     }
 }
