@@ -437,6 +437,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         private
         returns (uint256 balance0, uint256 balance1)
     {
+        // determine target ratio
         (uint256 desired0, uint256 desired1) = _getRangeAmounts(
             params.pool,
             params.amount0,
@@ -498,7 +499,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         );
 
         // Refund any leftover “dust”
-        _refundDust(params.token0, params.token1, addedAmount0, addedAmount1, amount0, amount1);
+        _refundDust(params.token0, params.token1, addedAmount0, addedAmount1, amount0Desired, amount1Desired);
 
         emit LiquidityIncreased(positionId, addedAmount0, addedAmount1);
     }
