@@ -34,6 +34,9 @@ contract LPManager is Ownable, ReentrancyGuard {
     error LPManager__InvalidQuoteAmount();
     error LPManager__InvalidPool();
     error LPManager__InvalidPrice();
+    error LPManager__NoFeesToCompound();
+    error LPManager__NoFeesToClaim();
+    error LPManager__AmountLessThanProtocolFee();
 
     ///////////////////
     // Types
@@ -47,8 +50,8 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     struct RebalanceParams {
         address pool;
-        int24 newLower;
-        int24 newUpper;
+        int24 tickLower;
+        int24 tickUpper;
         uint256 amount0;
         uint256 amount1;
         PoolTokens poolTokens;
@@ -59,8 +62,10 @@ contract LPManager is Ownable, ReentrancyGuard {
         address token1;
         uint256 amount0;
         uint256 amount1;
-        uint128 unclaimedFee0;
-        uint128 unclaimedFee1;
+        uint256 unclaimedFee0;
+        uint256 unclaimedFee1;
+        uint128 claimedFee0;
+        uint128 claimedFee1;
         int24 tickLower;
         int24 tickUpper;
         uint256 price;
@@ -73,8 +78,10 @@ contract LPManager is Ownable, ReentrancyGuard {
         int24 tickLower;
         int24 tickUpper;
         uint128 liquidity;
-        uint128 tokensOwed0;
-        uint128 tokensOwed1;
+        uint256 unclaimedFee0;
+        uint256 unclaimedFee1;
+        uint128 claimedFee0;
+        uint128 claimedFee1;
     }
 
     struct IncreaseLiquidityParams {
@@ -92,6 +99,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     uint256 private constant BPS_DENOMINATOR = 10_000;
     uint32 private constant SECONDS_AGO = 180;
     uint256 private constant SQRT_PRICE_X96_DENOMINATOR = 2 ** 192;
+    uint256 constant DUST_THRESHOLD_BPS = 100;
 
     INonfungiblePositionManager public immutable i_positionManager;
     ISwapRouter public immutable i_swapRouter;
@@ -117,7 +125,8 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint256 amount0,
         uint256 amount1
     );
-    event Withdrawn(uint256 indexed positionId, address tokenOut, uint256 amount);
+    event WithdrawnSingleToken(uint256 indexed positionId, address tokenOut, uint256 amount);
+    event WithdrawnBothTokens(uint256 indexed positionId, address token0, address token1, uint256 amount0, uint256 amount1);
 
     ///////////////////
     // Modifiers
@@ -177,19 +186,22 @@ contract LPManager is Ownable, ReentrancyGuard {
             revert LPManager__InvalidRange({currentTick: currentTick});
         }
 
-        // Swap half of tokenIn into the other token
-        (uint256 balance0, uint256 balance1) = _prepareSwap(tokenIn, amountIn, poolTokens);
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+        amountIn = _collectDepositProtocolFee(tokenIn, amountIn);
 
-        // Mint position
-        IncreaseLiquidityParams memory params = IncreaseLiquidityParams({
+        amount0 = tokenIn == poolTokens.token0 ? amountIn : 0;
+        amount1 = tokenIn == poolTokens.token1 ? amountIn : 0;
+
+        RebalanceParams memory params = RebalanceParams({
             pool: pool,
-            token0: poolTokens.token0,
-            token1: poolTokens.token1,
-            fee: poolTokens.fee,
+            amount0: amount0,
+            amount1: amount1,
             tickLower: tickLower,
-            tickUpper: tickUpper
+            tickUpper: tickUpper,
+            poolTokens: poolTokens
         });
-        (positionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
+        
+        (positionId, liquidity, amount0, amount1) = _openPosition(params);
         s_userPositions[msg.sender].push(positionId);
 
         uint256 price = _getPriceFromPool(pool, poolTokens.token0, poolTokens.token1);
@@ -198,6 +210,9 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     function claimFees(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
         amountTokenOut = _claimFees(positionId, tokenOut);
+        if (amountTokenOut == 0) {
+            revert LPManager__NoFeesToClaim();
+        }
         amountTokenOut = _collectFeesProtocolFee(tokenOut, amountTokenOut);
         IERC20(tokenOut).safeTransfer(msg.sender, amountTokenOut);
         emit ClaimedFees(positionId, tokenOut, amountTokenOut);
@@ -214,9 +229,12 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
         (uint256 amountToken0, uint256 amountToken1) = i_positionManager.collect(collectParams);
 
+        if (amountToken0 == 0 && amountToken1 == 0) {
+            revert LPManager__NoFeesToCompound();
+        }
+
         amountToken0 = _collectFeesProtocolFee(params.token0, amountToken0);
         amountToken1 = _collectFeesProtocolFee(params.token1, amountToken1);
-
         // Call increase position liquidity
         (added0, added1) = _increaseLiquidity(positionId, amountToken0, amountToken1, params);
     }
@@ -243,21 +261,12 @@ contract LPManager is Ownable, ReentrancyGuard {
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         amountIn = _collectDepositProtocolFee(tokenIn, amountIn);
 
-        PoolTokens memory poolTokens = PoolTokens({
-            token0: params.token0,
-            token1: params.token1,
-            fee: params.fee
-        });
-
-        // Swap half of tokenIn into the other side
-        address tokenOut = tokenIn == params.token0 ? params.token1 : params.token0;
-        (uint256 amount0, uint256 amount1) = _swap(tokenIn, tokenOut, amountIn / 2, poolTokens);
-
-        // Approve the NonfungiblePositionManager to pull tokens
-        _ensureAllowance(IERC20(params.token0), address(i_positionManager), amount0);
-        _ensureAllowance(IERC20(params.token1), address(i_positionManager), amount1);
+        // Approve the NonfungiblePositionManager to pull token
+        _ensureAllowance(IERC20(tokenIn), address(i_positionManager), amountIn);
 
         // Call increaseLiquidity on the position NFT
+        uint256 amount0 = tokenIn == params.token0 ? amountIn : 0;
+        uint256 amount1 = tokenIn == params.token1 ? amountIn : 0;
         (added0, added1) = _increaseLiquidity(positionId, amount0, amount1, params);
     }
 
@@ -276,59 +285,53 @@ contract LPManager is Ownable, ReentrancyGuard {
     {
         PoolTokens memory poolTokens;
         (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId);
-
         amount0 = _collectLiquidityProtocolFee(poolTokens.token0, amount0);
         amount1 = _collectLiquidityProtocolFee(poolTokens.token1, amount1);
-
-        RebalanceParams memory rp = RebalanceParams({
+        RebalanceParams memory params = RebalanceParams({
             pool: pool,
-            newLower: newLower,
-            newUpper: newUpper,
+            tickLower: newLower,
+            tickUpper: newUpper,
             amount0: amount0,
             amount1: amount1,
             poolTokens: poolTokens
         });
-        (uint256 balance0, uint256 balance1) = _rebalanceAmounts(rp);
-
-        IncreaseLiquidityParams memory params = IncreaseLiquidityParams({
-            pool: pool,
-            token0: poolTokens.token0,
-            token1: poolTokens.token1,
-            fee: poolTokens.fee,
-            tickLower: newLower,
-            tickUpper: newUpper
-        });
 
         uint128 liquidity;
-        (newPositionId, liquidity, amount0, amount1) = _openPosition(balance0, balance1, params);
+        (newPositionId, liquidity, amount0, amount1) = _openPosition(params);
         s_userPositions[msg.sender].push(newPositionId);
         emit RangeMoved(newPositionId, amount0, amount1);
     }
 
     /// @notice withdraw position in specified or both tokens
-    function withdraw(uint256 positionId, address tokenOut) external returns (uint256 totalOut) {
-        (uint256 amount0, uint256 amount1, PoolTokens memory poolTokens) = _decreaseLiquidity(positionId);
+    function withdraw(uint256 positionId, address tokenOut) external returns (uint256 amount0, uint256 amount1) {
+        PoolTokens memory poolTokens;
+        (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId);
+        address pool = IUniswapV3Factory(i_factory).getPool(poolTokens.token0, poolTokens.token1, poolTokens.fee);
 
         if (tokenOut != address(0) && tokenOut != poolTokens.token0 && tokenOut != poolTokens.token1) {
             revert LPManager__InvalidTokenOut(tokenOut, poolTokens.token0, poolTokens.token1);
         }
 
         if (tokenOut == address(0)) {
-            if (amount0 > 0) IERC20(poolTokens.token0).safeTransfer(msg.sender, amount0);
-            if (amount1 > 0) IERC20(poolTokens.token1).safeTransfer(msg.sender, amount1);
-            totalOut = amount0 + amount1;
-            emit Withdrawn(positionId, address(0), totalOut);
-            return totalOut;
+            if (amount0 > 0) {
+                amount0 = _collectLiquidityProtocolFee(tokenOut, amount0);
+                IERC20(poolTokens.token0).safeTransfer(msg.sender, amount0);
+            }
+            if (amount1 > 0) {
+                amount1 = _collectLiquidityProtocolFee(tokenOut, amount1);
+                IERC20(poolTokens.token1).safeTransfer(msg.sender, amount1);
+            }
+            emit WithdrawnBothTokens(positionId, poolTokens.token0, poolTokens.token1, amount0, amount1);
+            return (amount0, amount1);
         }
 
-        totalOut = 0;
+        uint256 totalOut = 0;
 
         if (amount0 > 0) {
             if (tokenOut == poolTokens.token0) {
                 totalOut += amount0;
             } else {
-                (,uint256 amountSwapped) = _swap(poolTokens.token0, tokenOut, amount0, poolTokens);
-                totalOut += amountSwapped;
+                totalOut += _swapWithDustCheck(poolTokens.token0, tokenOut, amount0, pool);
             }
         }
 
@@ -336,14 +339,19 @@ contract LPManager is Ownable, ReentrancyGuard {
             if (tokenOut == poolTokens.token1) {
                 totalOut += amount1;
             } else {
-                (uint256 amountSwapped,) = _swap(poolTokens.token1, tokenOut, amount1, poolTokens);
-                totalOut += amountSwapped;
+                totalOut += _swapWithDustCheck(poolTokens.token1, tokenOut, amount1, pool);
             }
         }
 
         totalOut = _collectLiquidityProtocolFee(tokenOut, totalOut);
         IERC20(tokenOut).safeTransfer(msg.sender, totalOut);
-        emit Withdrawn(positionId, tokenOut, totalOut);
+        emit WithdrawnSingleToken(positionId, tokenOut, totalOut);
+
+        if (tokenOut == poolTokens.token0) {
+            return (totalOut, 0);
+        } else {
+            return (0, totalOut);
+        }
     }
 
     function setSlippageBps(uint16 _slippageBps) external onlyOwner {
@@ -377,8 +385,10 @@ contract LPManager is Ownable, ReentrancyGuard {
             token1: rawData.token1,
             amount0: amount0,
             amount1: amount1,
-            unclaimedFee0: rawData.tokensOwed0,
-            unclaimedFee1: rawData.tokensOwed1,
+            unclaimedFee0: rawData.unclaimedFee0,
+            unclaimedFee1: rawData.unclaimedFee1,
+            claimedFee0: rawData.claimedFee0,
+            claimedFee1: rawData.claimedFee1,
             tickLower: rawData.tickLower,
             tickUpper: rawData.tickUpper,
             price: _getPriceFromPool(pool, rawData.token0, rawData.token1)
@@ -433,35 +443,6 @@ contract LPManager is Ownable, ReentrancyGuard {
         (amount0, amount1) = i_positionManager.collect(collectParams);
     }
 
-    function _rebalanceAmounts(RebalanceParams memory params)
-        private
-        returns (uint256 balance0, uint256 balance1)
-    {
-        // determine target ratio
-        (uint256 desired0, uint256 desired1) = _getRangeAmounts(
-            params.pool,
-            params.amount0,
-            params.amount1,
-            params.newLower,
-            params.newUpper
-        );
-
-        balance0 = params.amount0;
-        balance1 = params.amount1;
-
-        if (balance0 > desired0) {
-            uint256 toSwap = balance0 - desired0;
-            (,uint256 swapped) = _swap(params.poolTokens.token0, params.poolTokens.token1, toSwap, params.poolTokens);
-            balance0 = desired0;
-            balance1 += swapped;
-        } else if (balance1 > desired1) {
-            uint256 toSwap = balance1 - desired1;
-            (uint256 swapped,) = _swap(params.poolTokens.token1, params.poolTokens.token0, toSwap, params.poolTokens);
-            balance1 = desired1;
-            balance0 += swapped;
-        }
-    }
-
     function _increaseLiquidity(
         uint256 positionId,
         uint256 amount0,
@@ -471,13 +452,24 @@ contract LPManager is Ownable, ReentrancyGuard {
         private
         returns (uint256 addedAmount0, uint256 addedAmount1)
     {
+        if (amount0 == 0) {
+            uint256 halfAmount = amount1 / 2;
+            uint256 swapped = _swap(params.token1, params.token0, halfAmount, params.pool);
+            amount0 = swapped;
+            amount1 = amount1 - halfAmount;
+        } else if (amount1 == 0) {
+            uint256 halfAmount = amount0 / 2;
+            uint256 swapped = _swap(params.token0, params.token1, halfAmount, params.pool);
+            amount1 = swapped;
+            amount0 = amount0 - halfAmount;
+        }
         // rebalance amounts to match position proportions
         RebalanceParams memory rebalanceParams = RebalanceParams({
             pool: params.pool,
             amount0: amount0,
             amount1: amount1,
-            newLower: params.tickLower,
-            newUpper: params.tickUpper,
+            tickLower: params.tickLower,
+            tickUpper: params.tickUpper,
             poolTokens: PoolTokens({
                 token0: params.token0,
                 token1: params.token1,
@@ -520,6 +512,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     {
         // get position params
         (,, address token0, address token1, uint24 fee,,,,,,,) = i_positionManager.positions(positionId);
+        address pool = IUniswapV3Factory(i_factory).getPool(token0, token1, fee);
 
         // Collect all fees into this contract
         INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
@@ -531,55 +524,81 @@ contract LPManager is Ownable, ReentrancyGuard {
         (uint256 amountToken0, uint256 amountToken1) = i_positionManager.collect(collectParams);
 
         // Swap fees into tokenOut
-        PoolTokens memory poolTokens = PoolTokens({
-            token0: token0,
-            token1: token1,
-            fee: fee
-        });
-        
         amountTokenOut = 0;
         if (amountToken0 > 0) {
-            if (token0 != tokenOut) {
-                (,uint256 _amount) = _swap(token0, tokenOut, amountToken0, poolTokens);
-                amountTokenOut += _amount;
-            } else {
+            if (token0 == tokenOut) {
                 amountTokenOut += amountToken0;
+            } else {
+                amountTokenOut += _swapWithDustCheck(token0, tokenOut, amountToken0, pool);
             }
         }
 
         if (amountToken1 > 0) {
-            if (token1 != tokenOut) {
-                (uint256 _amount,) = _swap(token1, tokenOut, amountToken1, poolTokens);
-                amountTokenOut += _amount;
-            } else {
+            if (token1 == tokenOut) {
                 amountTokenOut += amountToken1;
+            } else {
+                amountTokenOut += _swapWithDustCheck(token1, tokenOut, amountToken1, pool);
             }
         }
     }
 
-    function _prepareSwap(
-        address tokenIn,
-        uint256 amountIn,
-        PoolTokens memory poolTokens
-    ) private returns (uint256 balance0, uint256 balance1) {
-        address tokenOut = tokenIn == poolTokens.token0 ? poolTokens.token1 : poolTokens.token0;
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
-        amountIn = _collectDepositProtocolFee(tokenIn, amountIn);
-        (balance0, balance1) = _swap(tokenIn, tokenOut, amountIn / 2, poolTokens);
-    }
-
-    /// @dev Swaps `amountIn` of `tokenIn` → `tokenOut` via UniswapV3, with full slippage & price-limit guards
-    function _swap(address tokenIn, address tokenOut, uint256 amountIn, PoolTokens memory poolTokens)
+    function _rebalanceAmounts(RebalanceParams memory params)
         private
         returns (uint256 balance0, uint256 balance1)
     {
+        // determine target ratio
+        (uint256 desired0, uint256 desired1) = _getRangeAmounts(
+            params.pool,
+            params.amount0,
+            params.amount1,
+            params.tickLower,
+            params.tickUpper
+        );
+
+        balance0 = params.amount0;
+        balance1 = params.amount1;
+
+        if (balance0 > desired0) {
+            uint256 toSwap = balance0 - desired0;
+            if (toSwap > (balance0 * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
+                uint256 swapped = _swap(params.poolTokens.token0, params.poolTokens.token1, toSwap, params.pool);
+                balance0 = desired0;
+                balance1 += swapped;
+            }
+        } else if (balance1 > desired1) {
+            uint256 toSwap = balance1 - desired1;
+            if (toSwap > (balance1 * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
+                uint256 swapped = _swap(params.poolTokens.token1, params.poolTokens.token0, toSwap, params.pool);
+                balance1 = desired1;
+                balance0 += swapped;
+            }
+        }
+    }
+
+    /// @notice swap only if above dust threshold
+    function _swapWithDustCheck(address tokenIn, address tokenOut, uint256 amountIn, address pool) private  returns (uint256 amountOut) {
+        if (amountIn > (amountIn * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
+            amountOut = _swap(tokenIn, tokenOut, amountIn, pool);
+        } else {
+            // Return dust as-is in original token
+            IERC20(tokenIn).safeTransfer(msg.sender, amountIn);
+            amountOut = 0;
+        }
+    }
+
+    /// @dev Swaps `amountIn` of `tokenIn` → `tokenOut` via UniswapV3, with full slippage & price-limit guards
+    function _swap(address tokenIn, address tokenOut, uint256 amountIn, address pool)
+        private
+        returns (uint256 amountSwapped)
+    {
         _ensureAllowance(IERC20(tokenIn), address(i_swapRouter), amountIn);
-        uint256 expectedOut = _getExpectedOutput(tokenIn, tokenOut, poolTokens.fee, amountIn);
+        uint24 fee = IUniswapV3Pool(pool).fee();
+        uint256 expectedOut = _getExpectedOutput(tokenIn, tokenOut, fee, amountIn);
         uint256 amountOutMinimum = _getAmountOutMinimum(expectedOut);
         ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
             tokenIn: tokenIn,
             tokenOut: tokenOut,
-            fee: poolTokens.fee,
+            fee: fee,
             recipient: address(this),
             deadline: block.timestamp + i_swap_deadline_blocks,
             amountIn: amountIn,
@@ -587,33 +606,38 @@ contract LPManager is Ownable, ReentrancyGuard {
             sqrtPriceLimitX96: 0
         });
 
-        uint256 unswappedHalf = amountIn - (amountIn / 2);
-        uint256 swappedAmount = i_swapRouter.exactInputSingle(params);
-
-        if (tokenIn == poolTokens.token0) {
-            return (unswappedHalf, swappedAmount);
-        } else {
-            return (swappedAmount, unswappedHalf);
-        }
+        amountSwapped = i_swapRouter.exactInputSingle(params);
     }
 
     function _openPosition(
-        uint256 balance0,
-        uint256 balance1,
-        IncreaseLiquidityParams memory params
+        RebalanceParams memory params
     ) private returns (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) {
+        if (params.amount0 == 0) {
+            uint256 halfAmount = params.amount1 / 2;
+            uint256 swapped = _swap(params.poolTokens.token1, params.poolTokens.token0, halfAmount, params.pool);
+            params.amount0 = swapped;
+            params.amount1 = params.amount1 - halfAmount;
+        } else if (params.amount1 == 0) {
+            uint256 halfAmount = params.amount0 / 2;
+            uint256 swapped = _swap(params.poolTokens.token0, params.poolTokens.token1, halfAmount, params.pool);
+            params.amount1 = swapped;
+            params.amount0 = params.amount0 - halfAmount;
+        }
+
+        (uint256 balance0, uint256 balance1) = _rebalanceAmounts(params);
+        
         // Compute desired mint amounts
         (uint256 amount0Desired, uint256 amount1Desired) = _getRangeAmounts(params.pool, balance0, balance1, params.tickLower, params.tickUpper);
         
         // Approve PositionManager to pull both tokens
-        _ensureAllowance(IERC20(params.token0), address(i_positionManager), amount0Desired);
-        _ensureAllowance(IERC20(params.token1), address(i_positionManager), amount1Desired);
+        _ensureAllowance(IERC20(params.poolTokens.token0), address(i_positionManager), amount0Desired);
+        _ensureAllowance(IERC20(params.poolTokens.token1), address(i_positionManager), amount1Desired);
 
         // Mint the position NFT directly to the user
         INonfungiblePositionManager.MintParams memory mintParams = INonfungiblePositionManager.MintParams({
-            token0: params.token0,
-            token1: params.token1,
-            fee: params.fee,
+            token0: params.poolTokens.token0,
+            token1: params.poolTokens.token1,
+            fee: params.poolTokens.fee,
             tickLower: params.tickLower,
             tickUpper: params.tickUpper,
             amount0Desired: amount0Desired,
@@ -625,7 +649,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
 
         (positionId, liquidity, amount0, amount1) = i_positionManager.mint(mintParams);
-        _refundDust(params.token0, params.token1, amount0, amount1, balance0, balance1);
+        _refundDust(params.poolTokens.token0, params.poolTokens.token1, amount0, amount1, balance0, balance1);
     }
 
     function _ensureAllowance(IERC20 token, address spender, uint256 amount) private {
@@ -722,18 +746,27 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     function _collectDepositProtocolFee(address token, uint256 amount) private returns (uint256) {
         uint256 depositProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateDepositProtocolFee(amount);
+        if (depositProtocolFee >= amount) {
+            revert LPManager__AmountLessThanProtocolFee();
+        }
         IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, depositProtocolFee);
         return amount - depositProtocolFee;
     }
 
     function _collectFeesProtocolFee(address token, uint256 amount) private returns (uint256) {
         uint256 feesProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateFeesProtocolFee(amount);
+        if (feesProtocolFee >= amount) {
+            revert LPManager__AmountLessThanProtocolFee();
+        }
         IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, feesProtocolFee);
         return amount - feesProtocolFee;
     }
 
     function _collectLiquidityProtocolFee(address token, uint256 amount) private returns (uint256) {
         uint256 liquidityProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateLiquidityProtocolFee(amount);
+        if (liquidityProtocolFee >= amount) {
+            revert LPManager__AmountLessThanProtocolFee();
+        }
         IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, liquidityProtocolFee);
         return amount - liquidityProtocolFee;
     }
@@ -786,12 +819,12 @@ contract LPManager is Ownable, ReentrancyGuard {
             int24 tickLower,
             int24 tickUpper,
             uint128 liquidity,
-            ,
-            ,
+            uint256 feeGrowthInside0LastX128,
+            uint256 feeGrowthInside1LastX128,
             uint128 tokensOwed0,
             uint128 tokensOwed1
         ) = i_positionManager.positions(positionId);
-
+        // todo: calculate unclaimed fees to get human-readable values
         rawPositionData = RawPositionData({
             token0: token0,
             token1: token1,
@@ -799,8 +832,10 @@ contract LPManager is Ownable, ReentrancyGuard {
             tickLower: tickLower,
             tickUpper: tickUpper,
             liquidity: liquidity,
-            tokensOwed0: tokensOwed0,
-            tokensOwed1: tokensOwed1
+            unclaimedFee0: feeGrowthInside0LastX128,
+            unclaimedFee1: feeGrowthInside1LastX128,
+            claimedFee0: tokensOwed0,
+            claimedFee1: tokensOwed1
         });
     }
 
