@@ -58,10 +58,11 @@ contract LPManager is Ownable, ReentrancyGuard {
     }
 
     struct Position {
+        address pool;
+        uint24 feeTier;
         address token0;
         address token1;
-        uint256 amount0;
-        uint256 amount1;
+        uint128 liquidity;
         uint256 unclaimedFee0;
         uint256 unclaimedFee1;
         uint128 claimedFee0;
@@ -117,15 +118,19 @@ contract LPManager is Ownable, ReentrancyGuard {
     ///////////////////
 
     event PositionCreated(uint256 indexed positionId, uint256 amount0, uint256 amount1, int24 tickLower, int24 tickUpper, uint256 price);
-    event ClaimedFees(uint256 indexed positionId, address indexed token, uint256 amount);
-    event ClaimedAllFees(address indexed token, uint256 amount);
+    event ClaimedFees(uint256 indexed positionId, uint256 amount0, uint256 amount1);
+    event ClaimedFeesInToken(uint256 indexed positionId, address indexed token, uint256 amount);
+    event CompoundedFees(uint256 indexed positionId, uint256 amountToken0, uint256 amountToken1);
     event LiquidityIncreased(uint256 indexed positionId, uint256 amountToken0, uint256 amountToken1);
     event RangeMoved(
-        uint256 indexed newPositionId,
+        uint256 indexed positionId,
+        uint256 indexed oldPositionId,
+        int24 tickLower,
+        int24 tickUpper,
         uint256 amount0,
         uint256 amount1
     );
-    event WithdrawnSingleToken(uint256 indexed positionId, address tokenOut, uint256 amount);
+    event WithdrawnSingleToken(uint256 indexed positionId, address tokenOut, uint256 amount, uint256 amount0, uint256 amount1);
     event WithdrawnBothTokens(uint256 indexed positionId, address token0, address token1, uint256 amount0, uint256 amount1);
 
     ///////////////////
@@ -208,14 +213,28 @@ contract LPManager is Ownable, ReentrancyGuard {
         emit PositionCreated(positionId, amount0, amount1, tickLower, tickUpper, price);
     }
 
-    function claimFees(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
-        amountTokenOut = _claimFees(positionId, tokenOut);
+    function claimFees(uint256 positionId) external nonReentrant returns (uint256 amount0, uint256 amount1) {
+        address token0;
+        address token1;
+        (token0, token1, amount0, amount1) = _claimFees(positionId);
+        if (amount0 == 0 && amount1 == 0) {
+            revert LPManager__NoFeesToClaim();
+        }
+        amount0 = _collectFeesProtocolFee(token0, amount0);
+        amount1 = _collectFeesProtocolFee(token1, amount1);
+        IERC20(token0).safeTransfer(msg.sender, amount0);
+        IERC20(token1).safeTransfer(msg.sender, amount1);
+        emit ClaimedFees(positionId, amount0, amount1);
+    }
+
+    function claimFeesInToken(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
+        amountTokenOut = _claimFeesTokenOut(positionId, tokenOut);
         if (amountTokenOut == 0) {
             revert LPManager__NoFeesToClaim();
         }
         amountTokenOut = _collectFeesProtocolFee(tokenOut, amountTokenOut);
         IERC20(tokenOut).safeTransfer(msg.sender, amountTokenOut);
-        emit ClaimedFees(positionId, tokenOut, amountTokenOut);
+        emit ClaimedFeesInToken(positionId, tokenOut, amountTokenOut);
     }
 
     function compoundFees(uint256 positionId) external isPositionOwner(positionId) returns (uint256 added0, uint256 added1) {
@@ -236,7 +255,10 @@ contract LPManager is Ownable, ReentrancyGuard {
         amountToken0 = _collectFeesProtocolFee(params.token0, amountToken0);
         amountToken1 = _collectFeesProtocolFee(params.token1, amountToken1);
         // Call increase position liquidity
+        // todo: we need to emit different event, so backend can add values to claimed fees
         (added0, added1) = _increaseLiquidity(positionId, amountToken0, amountToken1, params);
+
+        emit CompoundedFees(positionId, added0, added1);
     }
 
     /// @notice Increase liquidity in an existing Uniswap V3 position from a single-token deposit
@@ -268,6 +290,8 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint256 amount0 = tokenIn == params.token0 ? amountIn : 0;
         uint256 amount1 = tokenIn == params.token1 ? amountIn : 0;
         (added0, added1) = _increaseLiquidity(positionId, amount0, amount1, params);
+
+        emit LiquidityIncreased(positionId, added0, added1);
     }
 
     /// @notice Move an existing position to a new price range, recycling all principal and fees
@@ -299,7 +323,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint128 liquidity;
         (newPositionId, liquidity, amount0, amount1) = _openPosition(params);
         s_userPositions[msg.sender].push(newPositionId);
-        emit RangeMoved(newPositionId, amount0, amount1);
+        emit RangeMoved(newPositionId, positionId, newLower, newUpper, amount0, amount1);
     }
 
     /// @notice withdraw position in specified or both tokens
@@ -314,11 +338,11 @@ contract LPManager is Ownable, ReentrancyGuard {
 
         if (tokenOut == address(0)) {
             if (amount0 > 0) {
-                amount0 = _collectLiquidityProtocolFee(tokenOut, amount0);
+                amount0 = _collectLiquidityProtocolFee(poolTokens.token0, amount0);
                 IERC20(poolTokens.token0).safeTransfer(msg.sender, amount0);
             }
             if (amount1 > 0) {
-                amount1 = _collectLiquidityProtocolFee(tokenOut, amount1);
+                amount1 = _collectLiquidityProtocolFee(poolTokens.token1, amount1);
                 IERC20(poolTokens.token1).safeTransfer(msg.sender, amount1);
             }
             emit WithdrawnBothTokens(positionId, poolTokens.token0, poolTokens.token1, amount0, amount1);
@@ -345,7 +369,7 @@ contract LPManager is Ownable, ReentrancyGuard {
 
         totalOut = _collectLiquidityProtocolFee(tokenOut, totalOut);
         IERC20(tokenOut).safeTransfer(msg.sender, totalOut);
-        emit WithdrawnSingleToken(positionId, tokenOut, totalOut);
+        emit WithdrawnSingleToken(positionId, tokenOut, totalOut, amount0, amount1);
 
         if (tokenOut == poolTokens.token0) {
             return (totalOut, 0);
@@ -368,25 +392,39 @@ contract LPManager is Ownable, ReentrancyGuard {
     // External View Functions
     ///////////////////
 
+    /**
+     * @notice Retrieves comprehensive position information for a given Uniswap V3 position
+     * @dev This function calculates real-time position data including current token amounts,
+     *      unclaimed fees, and pool information. It fetches the current pool state to provide
+     *      accurate liquidity amounts based on the current price.
+     * @param positionId The unique identifier of the Uniswap V3 position NFT to query
+     * @return position A complete Position struct containing:
+     *         - pool: Address of the Uniswap V3 pool contract
+     *         - feeTier: Pool fee tier
+     *         - token0: Address of the first token in the pair
+     *         - token1: Address of the second token in the pair  
+     *         - liquidity: Current liquidity (in wei)
+     *         - unclaimedFee0: Unclaimed fees in token0 (in wei)
+     *         - unclaimedFee1: Unclaimed fees in token1 (in wei)
+     *         - claimedFee0: Previously claimed fees in token0 (in wei)
+     *         - claimedFee1: Previously claimed fees in token1 (in wei)
+     *         - tickLower: Lower tick boundary of the position range
+     *         - tickUpper: Upper tick boundary of the position range
+     *         - price: Current price of the pool
+     */
     function getPosition(uint256 positionId) external view returns (Position memory position) {
         RawPositionData memory rawData = _getRawPositionData(positionId);
         address pool = IUniswapV3Factory(i_factory).getPool(rawData.token0, rawData.token1, rawData.fee);
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        (uint256 amount0, uint256 amount1) =
-            LiquidityAmounts.getAmountsForLiquidity(
-                sqrtPriceX96,
-                TickMath.getSqrtRatioAtTick(rawData.tickLower),
-                TickMath.getSqrtRatioAtTick(rawData.tickUpper),
-                rawData.liquidity
-            );
+        (uint256 unclaimedFee0, uint256 unclamedFee1) = _calculateUnclaimedFees(pool, rawData.tickLower, rawData.tickUpper, rawData.liquidity, rawData.unclaimedFee0, rawData.unclaimedFee1);
 
         position = Position({
+            pool: pool,
+            feeTier: rawData.fee,
             token0: rawData.token0,
             token1: rawData.token1,
-            amount0: amount0,
-            amount1: amount1,
-            unclaimedFee0: rawData.unclaimedFee0,
-            unclaimedFee1: rawData.unclaimedFee1,
+            liquidity: rawData.liquidity,
+            unclaimedFee0: unclaimedFee0,
+            unclaimedFee1: unclamedFee1,
             claimedFee0: rawData.claimedFee0,
             claimedFee1: rawData.claimedFee1,
             tickLower: rawData.tickLower,
@@ -492,8 +530,6 @@ contract LPManager is Ownable, ReentrancyGuard {
 
         // Refund any leftover “dust”
         _refundDust(params.token0, params.token1, addedAmount0, addedAmount1, amount0Desired, amount1Desired);
-
-        emit LiquidityIncreased(positionId, addedAmount0, addedAmount1);
     }
 
     function _refundDust(address token0, address token1, uint256 usedAmount0, uint256 usedAmount1, uint256 totalAmount0, uint256 totalAmount1) private {
@@ -505,7 +541,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
-    function _claimFees(uint256 positionId, address tokenOut)
+    function _claimFeesTokenOut(uint256 positionId, address tokenOut)
         private
         isPositionOwner(positionId)
         returns (uint256 amountTokenOut)
@@ -540,6 +576,24 @@ contract LPManager is Ownable, ReentrancyGuard {
                 amountTokenOut += _swapWithDustCheck(token1, tokenOut, amountToken1, pool);
             }
         }
+    }
+
+    function _claimFees(uint256 positionId)
+        private
+        isPositionOwner(positionId)
+        returns (address token0, address token1, uint256 amountToken0, uint256 amountToken1)
+    {
+        // get position params
+        (,, token0, token1,,,,,,,,) = i_positionManager.positions(positionId);
+
+        // Collect all fees into this contract
+        INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
+            tokenId: positionId,
+            recipient: address(this),
+            amount0Max: type(uint128).max,
+            amount1Max: type(uint128).max
+        });
+        (amountToken0, amountToken1) = i_positionManager.collect(collectParams);
     }
 
     function _rebalanceAmounts(RebalanceParams memory params)
@@ -807,6 +861,64 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint256 denominator = SQRT_PRICE_X96_DENOMINATOR * (10 ** decimals1);
     
         price = numerator / denominator;
+    }
+
+    function _calculateUnclaimedFees(
+        address pool,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 liquidity,
+        uint256 feeGrowthInside0LastX128,
+        uint256 feeGrowthInside1LastX128
+    ) internal view returns (uint256 fee0, uint256 fee1) {
+        // Get current tick from pool
+        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        
+        // Get global fee growth
+        uint256 feeGrowthGlobal0X128 = IUniswapV3Pool(pool).feeGrowthGlobal0X128();
+        uint256 feeGrowthGlobal1X128 = IUniswapV3Pool(pool).feeGrowthGlobal1X128();
+        
+        // Get tick info for lower and upper ticks
+        (, , uint256 feeGrowthOutside0X128Lower, uint256 feeGrowthOutside1X128Lower,,,,) = 
+            IUniswapV3Pool(pool).ticks(tickLower);
+        (, , uint256 feeGrowthOutside0X128Upper, uint256 feeGrowthOutside1X128Upper,,,,) = 
+            IUniswapV3Pool(pool).ticks(tickUpper);
+        
+        // Calculate fee growth inside the position's range
+        uint256 feeGrowthInside0X128;
+        uint256 feeGrowthInside1X128;
+        
+        if (currentTick < tickLower) {
+            // Current tick is below the position range
+            feeGrowthInside0X128 = feeGrowthOutside0X128Lower - feeGrowthOutside0X128Upper;
+            feeGrowthInside1X128 = feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
+        } else if (currentTick >= tickUpper) {
+            // Current tick is above the position range
+            feeGrowthInside0X128 = feeGrowthOutside0X128Upper - feeGrowthOutside0X128Lower;
+            feeGrowthInside1X128 = feeGrowthOutside1X128Upper - feeGrowthOutside1X128Lower;
+        } else {
+            // Current tick is inside the position range
+            feeGrowthInside0X128 = feeGrowthGlobal0X128 - feeGrowthOutside0X128Lower - feeGrowthOutside0X128Upper;
+            feeGrowthInside1X128 = feeGrowthGlobal1X128 - feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
+        }
+        
+        // Calculate unclaimed fees
+        // Fee = (currentFeeGrowthInside - lastFeeGrowthInside) * liquidity / 2^128
+        fee0 = uint256(
+            FullMath.mulDiv(
+                feeGrowthInside0X128 - feeGrowthInside0LastX128,
+                liquidity,
+                0x100000000000000000000000000000000 // 2^128
+            )
+        );
+        
+        fee1 = uint256(
+            FullMath.mulDiv(
+                feeGrowthInside1X128 - feeGrowthInside1LastX128,
+                liquidity,
+                0x100000000000000000000000000000000 // 2^128
+            )
+        );
     }
 
     function _getRawPositionData(uint256 positionId) private view returns (RawPositionData memory rawPositionData) {
