@@ -25,7 +25,7 @@ contract ProtocolFeeCollector is Ownable {
     ///////////////////
     // State Variables
     ///////////////////
-    uint256 private constant BASIS_POINTS = 10000;
+    uint256 private constant BASIS_POINTS = 10_000;
     uint256 public s_liquidityProtocolFee;
     uint256 public s_feesProtocolFee;
     uint256 public s_depositProtocolFee;

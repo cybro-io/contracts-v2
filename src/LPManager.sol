@@ -37,6 +37,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     error LPManager__NoFeesToCompound();
     error LPManager__NoFeesToClaim();
     error LPManager__AmountLessThanProtocolFee();
+    error LPManager__InvalidBasisPoints();
 
     ///////////////////
     // Types
@@ -307,7 +308,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         returns (uint256 newPositionId, uint256 amount0, uint256 amount1)
     {
         PoolTokens memory poolTokens;
-        (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId);
+        (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId, BPS_DENOMINATOR);
         amount0 = _collectLiquidityProtocolFee(poolTokens.token0, amount0);
         amount1 = _collectLiquidityProtocolFee(poolTokens.token1, amount1);
         RebalanceParams memory params = RebalanceParams({
@@ -325,10 +326,17 @@ contract LPManager is Ownable, ReentrancyGuard {
         emit RangeMoved(newPositionId, positionId, newLower, newUpper, amount0, amount1);
     }
 
-    /// @notice withdraw position in specified or both tokens
-    function withdraw(uint256 positionId, address tokenOut) external returns (uint256 amount0, uint256 amount1) {
+    /// @notice Withdraws liquidity from a position and optionally swaps to a single token
+    /// @dev Removes the specified percentage of liquidity and collects tokens. If tokenOut is specified,
+    ///      swaps the other token to tokenOut. Pass address(0) to receive both tokens.
+    /// @param positionId The ID of the liquidity position to withdraw from
+    /// @param tokenOut The token address to receive all funds in, or address(0) to receive both tokens
+    /// @param bps The percentage of liquidity to withdraw in basis points (10000 = 100%)
+    /// @return amount0 The amount of token0 withdrawn (after swap if applicable)
+    /// @return amount1 The amount of token1 withdrawn (after swap if applicable)
+    function withdraw(uint256 positionId, address tokenOut, uint256 bps) external returns (uint256 amount0, uint256 amount1) {
         PoolTokens memory poolTokens;
-        (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId);
+        (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId, bps);
         address pool = IUniswapV3Factory(i_factory).getPool(poolTokens.token0, poolTokens.token1, poolTokens.fee);
 
         if (tokenOut != address(0) && tokenOut != poolTokens.token0 && tokenOut != poolTokens.token1) {
@@ -436,15 +444,20 @@ contract LPManager is Ownable, ReentrancyGuard {
     // Private Functions
     ///////////////////
     
-    function _decreaseLiquidity(uint256 positionId) private returns (uint256 amount0, uint256 amount1, PoolTokens memory poolTokens) {
+    function _decreaseLiquidity(uint256 positionId, uint256 bps) private returns (uint256 amount0, uint256 amount1, PoolTokens memory poolTokens) {
+        if (bps < 0 || bps > BPS_DENOMINATOR) {
+            revert LPManager__InvalidBasisPoints();
+        }
+        
         // Read current position data
         (,, address token0, address token1, uint24 fee,,, uint128 currentLiquidity,,,,) = i_positionManager.positions(positionId);
         
         // Collect both principal + fees
-        (amount0, amount1) = _withdraw(positionId, currentLiquidity);
-
-        // Burn the old NFT
-        i_positionManager.burn(positionId);
+        uint128 liquidityToRemove = bps == BPS_DENOMINATOR 
+            ? currentLiquidity
+            : uint128((currentLiquidity * bps) / BPS_DENOMINATOR);
+        
+        (amount0, amount1) = _withdraw(positionId, liquidityToRemove);
 
         // Swap any surplus into deficit to hit the 0/1 ratio exactly
         poolTokens = PoolTokens({
