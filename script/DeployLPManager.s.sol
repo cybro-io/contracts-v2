@@ -23,8 +23,9 @@ contract DeployLPManager is Script {
         ) = helperConfig.activeNetworkConfig();
 
         vm.startBroadcast(deployerKey);
-        ProtocolFeeCollector feeCollector = new ProtocolFeeCollector(0, 0, 0);
-        LPManager lpManager = new LPManager(positionManager, swapRouter, uniswapV3Factory, quoter, address(feeCollector), swapDeadlineBlocks);
+        // ProtocolFeeCollector feeCollector = new ProtocolFeeCollector(0, 0, 0);
+        // LPManager lpManager = new LPManager(positionManager, swapRouter, uniswapV3Factory, quoter, address(feeCollector), swapDeadlineBlocks);
+        LPManager lpManager = new LPManager(positionManager, swapRouter, uniswapV3Factory, quoter, 0x03EF21cDd9609668996aAAECdd9dfdDFe7cad110, swapDeadlineBlocks);
         vm.stopBroadcast();
         return (lpManager, helperConfig);
     }

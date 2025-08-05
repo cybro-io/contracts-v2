@@ -848,7 +848,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         if (depositProtocolFee >= amount) {
             revert LPManager__AmountLessThanProtocolFee();
         }
-        IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, depositProtocolFee);
+        IERC20(token).safeTransfer(i_protocolFeeCollector, depositProtocolFee);
         return amount - depositProtocolFee;
     }
 
@@ -857,7 +857,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         if (feesProtocolFee >= amount) {
             revert LPManager__AmountLessThanProtocolFee();
         }
-        IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, feesProtocolFee);
+        IERC20(token).safeTransfer(i_protocolFeeCollector, feesProtocolFee);
         return amount - feesProtocolFee;
     }
 
@@ -866,7 +866,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         if (liquidityProtocolFee >= amount) {
             revert LPManager__AmountLessThanProtocolFee();
         }
-        IERC20(token).safeTransferFrom(address(this), i_protocolFeeCollector, liquidityProtocolFee);
+        IERC20(token).safeTransfer(i_protocolFeeCollector, liquidityProtocolFee);
         return amount - liquidityProtocolFee;
     }
 
