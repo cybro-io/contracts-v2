@@ -105,14 +105,11 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     INonfungiblePositionManager public immutable i_positionManager;
     ISwapRouter public immutable i_swapRouter;
-    IQuoterV2 public immutable i_quoter;
-    
     address public immutable i_protocolFeeCollector;
     address public immutable i_factory;
     uint256 public immutable i_swap_deadline_blocks;
 
     uint16 public s_slippageBps = 50;
-    mapping(address => uint256[]) public s_userPositions;
 
     ///////////////////
     // Events
@@ -148,10 +145,9 @@ contract LPManager is Ownable, ReentrancyGuard {
     // Functions
     ///////////////////
 
-    constructor(address _positionManager, address _swapRouter, address _factory, address _quoter, address _protocolFeeCollector, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
+    constructor(address _positionManager, address _swapRouter, address _factory, address _protocolFeeCollector, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
         i_positionManager = INonfungiblePositionManager(_positionManager);
         i_swapRouter = ISwapRouter(_swapRouter);
-        i_quoter = IQuoterV2(_quoter);
         i_protocolFeeCollector = _protocolFeeCollector;
         i_factory = _factory;
         i_swap_deadline_blocks = swapDeadlineBlocks;
@@ -161,16 +157,22 @@ contract LPManager is Ownable, ReentrancyGuard {
     // External Functions
     ///////////////////
 
-    /// @notice Create a Uniswap V3 LP position from a single-token deposit
-    /// @param pool The Uniswap V3 pool to deposit into
-    /// @param tokenIn The single token the user is supplying (must be token0 or token1 of the pool)
-    /// @param amountIn Total amount of tokenIn to pull from the user
-    /// @param tickLower Lower tick boundary of the desired price range
-    /// @param tickUpper Upper tick boundary of the desired price range
-    /// @return positionId The ID of the newly minted position NFT
-    /// @return liquidity The amount of liquidity units minted
-    /// @return amount0 The actual amount of token0 deposited into the position
-    /// @return amount1 The actual amount of token1 deposited into the position
+    /**
+     * @notice Creates a new Uniswap V3 liquidity position from a single token deposit
+     * @dev Pulls tokenIn, deducts protocol fee, swaps to optimal ratio, and mints position NFT
+     * @param pool The Uniswap V3 pool address to create position in
+     * @param tokenIn The deposit token (must be pool's token0 or token1)
+     * @param amountIn Amount of tokenIn to deposit from caller
+     * @param tickLower Lower tick boundary of the price range
+     * @param tickUpper Upper tick boundary of the price range
+     * @return positionId The ID of the newly minted position NFT
+     * @return liquidity Amount of liquidity units minted
+     * @return amount0 Actual amount of token0 deposited into position
+     * @return amount1 Actual amount of token1 deposited into position
+     * @custom:reverts LPManager__InvalidTokenIn if tokenIn not in pool
+     * @custom:reverts LPManager__InvalidRange if range doesn't include current tick
+     * @custom:emits PositionCreated with position details and current price
+     */
     function createPosition(address pool, address tokenIn, uint256 amountIn, int24 tickLower, int24 tickUpper)
         external
         nonReentrant
@@ -208,12 +210,21 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
         
         (positionId, liquidity, amount0, amount1) = _openPosition(params);
-        s_userPositions[msg.sender].push(positionId);
 
         uint256 price = _getPriceFromPool(pool, poolTokens.token0, poolTokens.token1);
         emit PositionCreated(positionId, amount0, amount1, tickLower, tickUpper, price);
     }
 
+    /**
+     * @notice Claims accumulated trading fees from a liquidity position
+     * @dev Collects fees, deducts protocol fees, and transfers net amounts to caller
+     * @param positionId The unique identifier of the liquidity position
+     * @return amount0 Net amount of token0 fees after protocol fee deduction
+     * @return amount1 Net amount of token1 fees after protocol fee deduction
+     * @custom:reverts LPManager__NoFeesToClaim if no fees available
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
+     * @custom:emits ClaimedFees on successful fee claim
+     */
     function claimFees(uint256 positionId) external nonReentrant returns (uint256 amount0, uint256 amount1) {
         address token0;
         address token1;
@@ -228,6 +239,16 @@ contract LPManager is Ownable, ReentrancyGuard {
         emit ClaimedFees(positionId, amount0, amount1);
     }
 
+    /**
+     * @notice Claims accumulated fees from a position and converts them to a single token
+     * @dev Collects fees, swaps them to specified token, deducts protocol fees, and transfers to caller
+     * @param positionId The unique identifier of the liquidity position
+     * @param tokenOut The target token to receive all fees in
+     * @return amountTokenOut Net amount of tokenOut received after swaps and protocol fee deduction
+     * @custom:reverts LPManager__NoFeesToClaim if no fees available after swaps
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
+     * @custom:emits ClaimedFeesInToken on successful fee claim and conversion
+     */
     function claimFeesInToken(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
         amountTokenOut = _claimFeesTokenOut(positionId, tokenOut);
         if (amountTokenOut == 0) {
@@ -238,6 +259,17 @@ contract LPManager is Ownable, ReentrancyGuard {
         emit ClaimedFeesInToken(positionId, tokenOut, amountTokenOut);
     }
 
+    /**
+     * @notice Compounds accumulated fees back into the liquidity position
+     * @dev Collects fees, deducts protocol fees, rebalances tokens, and adds liquidity to position
+     * @param positionId The unique identifier of the liquidity position to compound
+     * @return added0 Amount of token0 actually added to the position as liquidity
+     * @return added1 Amount of token1 actually added to the position as liquidity
+     * @custom:reverts LPManager__NoFeesToCompound if no fees available to compound
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
+     * @custom:emits CompoundedFees when fees are successfully compounded
+     * @custom:gas-optimization Automatically rebalances tokens to optimal ratio for the position's range
+     */
     function compoundFees(uint256 positionId) external isPositionOwner(positionId) returns (uint256 added0, uint256 added1) {
         // Claim fees into LPManager contract
         IncreaseLiquidityParams memory params = _getIncreaseLiquidityParams(positionId);
@@ -261,12 +293,18 @@ contract LPManager is Ownable, ReentrancyGuard {
         emit CompoundedFees(positionId, added0, added1);
     }
 
-    /// @notice Increase liquidity in an existing Uniswap V3 position from a single-token deposit
-    /// @param positionId The ID of the position NFT to update
-    /// @param tokenIn The token you’re depositing (must be token0 or token1 of the position)
-    /// @param amountIn Total amount of `tokenIn` to pull from the caller
-    /// @return added0 The actual amount of token0 deposited
-    /// @return added1 The actual amount of token1 deposited
+    /**
+     * @notice Increases liquidity in an existing position using a single token deposit
+     * @dev Pulls tokenIn from caller, deducts protocol fee, and adds liquidity via optimal swapping
+     * @param positionId The ID of the position NFT to increase
+     * @param tokenIn The deposit token (must be token0 or token1 of the position)
+     * @param amountIn Amount of tokenIn to deposit from caller
+     * @return added0 Actual amount of token0 added as liquidity
+     * @return added1 Actual amount of token1 added as liquidity
+     * @custom:reverts LPManager__InvalidTokenIn if tokenIn is not position's token0 or token1
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
+     * @custom:emits LiquidityIncreased on successful liquidity addition
+     */
     function increaseLiquidity(uint256 positionId, address tokenIn, uint256 amountIn)
         external
         isPositionOwner(positionId)
@@ -294,14 +332,19 @@ contract LPManager is Ownable, ReentrancyGuard {
         emit LiquidityIncreased(positionId, added0, added1);
     }
 
-    /// @notice Move an existing position to a new price range, recycling all principal and fees
-    /// @param pool The Uniswap V3 pool to deposit into
-    /// @param positionId The ID of the position NFT to move
-    /// @param newLower The new tickLower for the range
-    /// @param newUpper The new tickUpper for the range
-    /// @return newPositionId The ID of the newly minted position NFT
-    /// @return amount0 The actual amount of token0 deposited into the new position
-    /// @return amount1 The actual amount of token1 deposited into the new position
+    /**
+     * @notice Moves an existing position to a new price range, recycling all liquidity and fees
+     * @dev Closes old position, collects all tokens/fees, deducts protocol fees, and creates new position
+     * @param pool The Uniswap V3 pool address for the new position
+     * @param positionId The existing position ID to move
+     * @param newLower Lower tick boundary of the new price range
+     * @param newUpper Upper tick boundary of the new price range
+     * @return newPositionId The ID of the newly created position NFT
+     * @return amount0 Actual amount of token0 deposited into new position
+     * @return amount1 Actual amount of token1 deposited into new position
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
+     * @custom:emits RangeMoved with old and new position details
+     */
     function moveRange(address pool, uint256 positionId, int24 newLower, int24 newUpper)
         external
         nonReentrant
@@ -322,18 +365,22 @@ contract LPManager is Ownable, ReentrancyGuard {
 
         uint128 liquidity;
         (newPositionId, liquidity, amount0, amount1) = _openPosition(params);
-        s_userPositions[msg.sender].push(newPositionId);
         emit RangeMoved(newPositionId, positionId, newLower, newUpper, amount0, amount1);
     }
 
-    /// @notice Withdraws liquidity from a position and optionally swaps to a single token
-    /// @dev Removes the specified percentage of liquidity and collects tokens. If tokenOut is specified,
-    ///      swaps the other token to tokenOut. Pass address(0) to receive both tokens.
-    /// @param positionId The ID of the liquidity position to withdraw from
-    /// @param tokenOut The token address to receive all funds in, or address(0) to receive both tokens
-    /// @param bps The percentage of liquidity to withdraw in basis points (10000 = 100%)
-    /// @return amount0 The amount of token0 withdrawn (after swap if applicable)
-    /// @return amount1 The amount of token1 withdrawn (after swap if applicable)
+    /**
+     * @notice Withdraws liquidity from a position with optional single-token conversion
+     * @dev Removes specified liquidity percentage, deducts protocol fees, optionally swaps to tokenOut
+     * @param positionId The position ID to withdraw from
+     * @param tokenOut Target token address, or address(0) to receive both tokens
+     * @param bps Percentage to withdraw in basis points (10000 = 100%)
+     * @return amount0 Amount of token0 withdrawn (0 if swapped to token1)
+     * @return amount1 Amount of token1 withdrawn (0 if swapped to token0)
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
+     * @custom:reverts LPManager__InvalidTokenOut if tokenOut not in pool
+     * @custom:reverts LPManager__InvalidBasisPoints if bps > 10000
+     * @custom:emits WithdrawnBothTokens or WithdrawnSingleToken based on tokenOut
+     */
     function withdraw(uint256 positionId, address tokenOut, uint256 bps) external returns (uint256 amount0, uint256 amount1) {
         PoolTokens memory poolTokens;
         (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId, bps);
@@ -385,14 +432,14 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Updates the slippage tolerance for swaps
+     * @dev Sets maximum acceptable slippage in basis points (e.g., 300 = 3%)
+     * @param _slippageBps New slippage tolerance in basis points
+     * @custom:access Only callable by contract owner
+     */
     function setSlippageBps(uint16 _slippageBps) external onlyOwner {
         s_slippageBps = _slippageBps;
-    }
-
-    /// @dev for test purpose to withdraw extra tokens in case _refundDust isn't working
-    function emergencyWithdraw(address token) external onlyOwner {
-        uint256 amount = IERC20(token).balanceOf(address(this));
-        IERC20(token).safeTransfer(msg.sender, amount);
     }
 
     ///////////////////
@@ -400,24 +447,22 @@ contract LPManager is Ownable, ReentrancyGuard {
     ///////////////////
 
     /**
-     * @notice Retrieves comprehensive position information for a given Uniswap V3 position
-     * @dev This function calculates real-time position data including current token amounts,
-     *      unclaimed fees, and pool information. It fetches the current pool state to provide
-     *      accurate liquidity amounts based on the current price.
-     * @param positionId The unique identifier of the Uniswap V3 position NFT to query
-     * @return position A complete Position struct containing:
-     *         - pool: Address of the Uniswap V3 pool contract
-     *         - feeTier: Pool fee tier
-     *         - token0: Address of the first token in the pair
-     *         - token1: Address of the second token in the pair  
-     *         - liquidity: Current liquidity (in wei)
-     *         - unclaimedFee0: Unclaimed fees in token0 (in wei)
-     *         - unclaimedFee1: Unclaimed fees in token1 (in wei)
-     *         - claimedFee0: Previously claimed fees in token0 (in wei)
-     *         - claimedFee1: Previously claimed fees in token1 (in wei)
-     *         - tickLower: Lower tick boundary of the position range
-     *         - tickUpper: Upper tick boundary of the position range
-     *         - price: Current price of the pool
+     * @notice Retrieves comprehensive position information for a Uniswap V3 position
+     * @dev Calculates real-time data including current amounts, unclaimed fees, and pool state
+     * @param positionId The position NFT ID to query
+     * @return position Complete position data struct with the following fields:
+     * - pool: Uniswap V3 pool contract address
+     * - feeTier: Pool fee tier (e.g., 500, 3000, 10000)
+     * - token0: First token address in the pair
+     * - token1: Second token address in the pair
+     * - liquidity: Current position liquidity amount
+     * - unclaimedFee0: Unclaimed token0 fees
+     * - unclaimedFee1: Unclaimed token1 fees  
+     * - claimedFee0: Previously claimed token0 fees
+     * - claimedFee1: Previously claimed token1 fees
+     * - tickLower: Lower price range boundary
+     * - tickUpper: Upper price range boundary
+     * - price: Current pool price (token1 per token0)
      */
     function getPosition(uint256 positionId) external view returns (Position memory position) {
         RawPositionData memory rawData = _getRawPositionData(positionId);
@@ -444,6 +489,15 @@ contract LPManager is Ownable, ReentrancyGuard {
     // Private Functions
     ///////////////////
     
+    /**
+     * @notice Internal function to remove liquidity and collect tokens from position
+     * @dev Calculates liquidity amount to remove and collects both principal and fees
+     * @param positionId The position to decrease
+     * @param bps Basis points of liquidity to remove
+     * @return amount0 Token0 amount collected
+     * @return amount1 Token1 amount collected
+     * @return poolTokens Struct containing pool's token addresses and fee
+     */
     function _decreaseLiquidity(uint256 positionId, uint256 bps) private returns (uint256 amount0, uint256 amount1, PoolTokens memory poolTokens) {
         if (bps < 0 || bps > BPS_DENOMINATOR) {
             revert LPManager__InvalidBasisPoints();
@@ -467,6 +521,15 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
     }
 
+    /**
+     * @notice Internal function to decrease liquidity and collect all available tokens
+     * @dev Removes specified liquidity amount and collects both principal and accumulated fees
+     * @param positionId The position to withdraw from
+     * @param currentLiquidity Amount of liquidity to remove
+     * @return amount0 Total token0 collected (principal + fees)
+     * @return amount1 Total token1 collected (principal + fees)
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position (via modifier)
+     */
     function _withdraw(uint256 positionId, uint128 currentLiquidity)
         private
         isPositionOwner(positionId)
@@ -493,6 +556,18 @@ contract LPManager is Ownable, ReentrancyGuard {
         (amount0, amount1) = i_positionManager.collect(collectParams);
     }
 
+    /**
+     * @notice Internal function to add liquidity to an existing position
+     * @dev Handles token rebalancing and optimal swapping before increasing position liquidity
+     * @param positionId The position to increase liquidity for
+     * @param amount0 Available amount of token0 to add
+     * @param amount1 Available amount of token1 to add
+     * @param params Cached position parameters including tokens, pool, and tick range
+     * @return addedAmount0 Actual amount of token0 added to position
+     * @return addedAmount1 Actual amount of token1 added to position
+     * @custom:optimization Automatically swaps tokens to match position's tick range ratio
+     * @custom:dust-handling Refunds any leftover tokens after liquidity addition
+     */
     function _increaseLiquidity(
         uint256 positionId,
         uint256 amount0,
@@ -549,6 +624,18 @@ contract LPManager is Ownable, ReentrancyGuard {
         _refundDust(params.token0, params.token1, addedAmount0, addedAmount1, amount0, amount1);
     }
 
+    /**
+     * @notice Rebalances token amounts to match optimal ratio for a given price range
+     * @dev Calculates desired ratio and swaps excess tokens, with dust threshold protection
+     * @param pool The Uniswap V3 pool address
+     * @param amount0 Current amount of token0 available
+     * @param amount1 Current amount of token1 available
+     * @param tickLower Lower tick of the target range
+     * @param tickUpper Upper tick of the target range
+     * @return newAmount0 Rebalanced amount of token0
+     * @return newAmount1 Rebalanced amount of token1
+     * @custom:optimization Skips swaps below dust threshold to avoid failed transactions
+     */
     function _rebalanceToRangeRatio(
         address pool,
         uint256 amount0,
@@ -581,6 +668,16 @@ contract LPManager is Ownable, ReentrancyGuard {
         return (amount0, amount1);
     }
 
+    /**
+     * @notice Refunds unused token amounts back to the caller
+     * @dev Transfers any leftover tokens that weren't used in liquidity operations
+     * @param token0 Address of token0
+     * @param token1 Address of token1
+     * @param usedAmount0 Amount of token0 actually used
+     * @param usedAmount1 Amount of token1 actually used
+     * @param totalAmount0 Total amount of token0 available
+     * @param totalAmount1 Total amount of token1 available
+     */
     function _refundDust(address token0, address token1, uint256 usedAmount0, uint256 usedAmount1, uint256 totalAmount0, uint256 totalAmount1) private {
         if (totalAmount0 > usedAmount0) {
             IERC20(token0).safeTransfer(msg.sender, totalAmount0 - usedAmount0);
@@ -590,6 +687,15 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Internal function to collect and convert fees to a single token
+     * @dev Collects raw fees from position manager and swaps both tokens to tokenOut if needed
+     * @param positionId The position to collect fees from
+     * @param tokenOut The token to convert all fees into
+     * @return amountTokenOut Total amount of tokenOut obtained from fee collection and swaps
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position (via modifier)
+     * @custom:gas-optimization Uses dust check to avoid failed swaps on small amounts
+     */
     function _claimFeesTokenOut(uint256 positionId, address tokenOut)
         private
         isPositionOwner(positionId)
@@ -627,6 +733,16 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Internal function to collect raw fees from Uniswap position manager
+     * @dev Retrieves position tokens and collects all available fees to this contract
+     * @param positionId The position to collect fees from
+     * @return token0 Address of the first token in the pair
+     * @return token1 Address of the second token in the pair  
+     * @return amountToken0 Raw amount of token0 fees collected
+     * @return amountToken1 Raw amount of token1 fees collected
+     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position (via modifier)
+     */
     function _claimFees(uint256 positionId)
         private
         isPositionOwner(positionId)
@@ -645,40 +761,15 @@ contract LPManager is Ownable, ReentrancyGuard {
         (amountToken0, amountToken1) = i_positionManager.collect(collectParams);
     }
 
-    function _rebalanceAmounts(RebalanceParams memory params)
-        private
-        returns (uint256 balance0, uint256 balance1)
-    {
-        // determine target ratio
-        (uint256 desired0, uint256 desired1) = _getRangeAmounts(
-            params.pool,
-            params.amount0,
-            params.amount1,
-            params.tickLower,
-            params.tickUpper
-        );
-
-        balance0 = params.amount0;
-        balance1 = params.amount1;
-
-        if (balance0 > desired0) {
-            uint256 toSwap = balance0 - desired0;
-            if (toSwap > (balance0 * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
-                uint256 swapped = _swap(params.poolTokens.token0, params.poolTokens.token1, toSwap, params.pool);
-                balance0 = desired0;
-                balance1 += swapped;
-            }
-        } else if (balance1 > desired1) {
-            uint256 toSwap = balance1 - desired1;
-            if (toSwap > (balance1 * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
-                uint256 swapped = _swap(params.poolTokens.token1, params.poolTokens.token0, toSwap, params.pool);
-                balance1 = desired1;
-                balance0 += swapped;
-            }
-        }
-    }
-
-    /// @notice swap only if above dust threshold
+    /**
+     * @notice Swaps tokens only if amount exceeds dust threshold, otherwise refunds original token
+     * @dev Prevents failed swaps on tiny amounts by checking against dust threshold
+     * @param tokenIn Source token address
+     * @param tokenOut Target token address  
+     * @param amountIn Amount to swap or refund
+     * @param pool Pool address for the swap
+     * @return amountOut Amount of tokenOut received (0 if dust refunded)
+     */
     function _swapWithDustCheck(address tokenIn, address tokenOut, uint256 amountIn, address pool) private  returns (uint256 amountOut) {
         if (amountIn > (amountIn * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
             amountOut = _swap(tokenIn, tokenOut, amountIn, pool);
@@ -689,7 +780,15 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
-    /// @dev Swaps `amountIn` of `tokenIn` → `tokenOut` via UniswapV3, with full slippage & price-limit guards
+    /**
+     * @notice Executes token swap via Uniswap V3 with slippage protection
+     * @dev Uses exact input swap with calculated minimum output and price limits
+     * @param tokenIn Source token address
+     * @param tokenOut Target token address
+     * @param amountIn Exact amount to swap
+     * @param pool Pool address for fee tier lookup
+     * @return amountSwapped Actual amount of tokenOut received
+     */
     function _swap(address tokenIn, address tokenOut, uint256 amountIn, address pool)
         private
         returns (uint256 amountSwapped)
@@ -712,6 +811,16 @@ contract LPManager is Ownable, ReentrancyGuard {
         amountSwapped = i_swapRouter.exactInputSingle(params);
     }
 
+    /**
+     * @notice Internal function to create position after token rebalancing
+     * @dev Handles optimal swapping for single-token deposits and mints the position NFT
+     * @param params Rebalance parameters containing amounts, tokens, pool, and tick range
+     * @return positionId The newly minted position ID
+     * @return liquidity Amount of liquidity minted
+     * @return amount0 Token0 amount used in position creation
+     * @return amount1 Token1 amount used in position creation
+     * @custom:optimization Calculates optimal swap ratios for single-token deposits
+     */
     function _openPosition(
         RebalanceParams memory params
     ) private returns (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) {
@@ -761,6 +870,17 @@ contract LPManager is Ownable, ReentrancyGuard {
         _refundDust(params.poolTokens.token0, params.poolTokens.token1, amount0, amount1, params.amount0, params.amount1);
     }
 
+    /**
+     * @notice Calculates optimal swap amount to achieve proper token ratio for a price range
+     * @dev Uses linear interpolation based on current tick position within the range
+     * @param pool Pool address for current tick lookup
+     * @param tokenIn The input token being swapped
+     * @param amountIn Total amount available to swap
+     * @param tickLower Lower boundary of target range
+     * @param tickUpper Upper boundary of target range
+     * @return Optimal amount of tokenIn to swap for balanced liquidity addition
+     * @custom:algorithm Linear interpolation: more token0 needed near upper tick, more token1 near lower tick
+     */
     function _findOptimalSwapAmount(
         address pool,
         address tokenIn,
@@ -792,6 +912,13 @@ contract LPManager is Ownable, ReentrancyGuard {
         return (amountIn * swapPercentage) / 1e18;
     }
 
+    /**
+     * @notice Ensures sufficient token allowance for spender, setting to max if needed
+     * @dev Checks current allowance and approves max uint256 if insufficient
+     * @param token The ERC20 token to approve
+     * @param spender Address that needs token approval
+     * @param amount Minimum required allowance amount
+     */
     function _ensureAllowance(IERC20 token, address spender, uint256 amount) private {
         uint256 current = token.allowance(address(this), spender);
         if (current < amount) {
@@ -799,6 +926,17 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Calculates expected swap output using current pool price and fees
+     * @dev Applies trading fees, uses sqrtPrice for conversion, adds 2% safety buffer
+     * @param tokenIn Source token address
+     * @param tokenOut Target token address
+     * @param fee Pool fee tier in hundredths of basis points
+     * @param amountIn Amount to swap
+     * @return expectedOut Expected output amount with safety buffer applied
+     * @custom:reverts LPManager__InvalidPool if pool doesn't exist
+     * @custom:reverts LPManager__InvalidPrice if calculated output is zero
+     */
     function _getExpectedOutput(
         address tokenIn,
         address tokenOut,
@@ -843,6 +981,14 @@ contract LPManager is Ownable, ReentrancyGuard {
         return expectedOut;
     }
 
+    /**
+     * @notice Deducts protocol fee from deposit amounts
+     * @dev Calculates and transfers deposit protocol fee, returns net amount
+     * @param token Token address to collect fee from
+     * @param amount Gross deposit amount
+     * @return Net amount after protocol fee deduction
+     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
+     */
     function _collectDepositProtocolFee(address token, uint256 amount) private returns (uint256) {
         uint256 depositProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateDepositProtocolFee(amount);
         if (depositProtocolFee >= amount) {
@@ -852,6 +998,14 @@ contract LPManager is Ownable, ReentrancyGuard {
         return amount - depositProtocolFee;
     }
 
+    /**
+     * @notice Deducts protocol fee from claimed fees
+     * @dev Calculates and transfers fees protocol fee, returns net amount
+     * @param token Token address to collect fee from
+     * @param amount Gross fee amount
+     * @return Net amount after protocol fee deduction
+     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
+     */
     function _collectFeesProtocolFee(address token, uint256 amount) private returns (uint256) {
         uint256 feesProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateFeesProtocolFee(amount);
         if (feesProtocolFee >= amount) {
@@ -861,6 +1015,14 @@ contract LPManager is Ownable, ReentrancyGuard {
         return amount - feesProtocolFee;
     }
 
+    /**
+     * @notice Deducts protocol fee from withdrawn liquidity
+     * @dev Calculates and transfers liquidity protocol fee, returns net amount
+     * @param token Token address to collect fee from
+     * @param amount Gross withdrawal amount
+     * @return Net amount after protocol fee deduction
+     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
+     */
     function _collectLiquidityProtocolFee(address token, uint256 amount) private returns (uint256) {
         uint256 liquidityProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateLiquidityProtocolFee(amount);
         if (liquidityProtocolFee >= amount) {
@@ -874,6 +1036,17 @@ contract LPManager is Ownable, ReentrancyGuard {
     // Private View Functions
     ////////////////////////////
 
+    /**
+     * @notice Calculates optimal token amounts for a given price range
+     * @dev Uses Uniswap's LiquidityAmounts library to determine proper token ratio
+     * @param pool Pool address for current price lookup
+     * @param amount0 Available token0 amount
+     * @param amount1 Available token1 amount
+     * @param tickLower Lower tick of target range
+     * @param tickUpper Upper tick of target range
+     * @return amount0Desired Optimal amount of token0 for the range
+     * @return amount1Desired Optimal amount of token1 for the range
+     */
     function _getRangeAmounts(address pool, uint256 amount0, uint256 amount1, int24 tickLower, int24 tickUpper) private view returns (uint256 amount0Desired, uint256 amount1Desired) {
         (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
         uint160 sqrtA = TickMath.getSqrtRatioAtTick(tickLower);
@@ -882,6 +1055,12 @@ contract LPManager is Ownable, ReentrancyGuard {
         (amount0Desired, amount1Desired) = LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, sqrtA, sqrtB, optLiq);
     }
 
+    /**
+     * @notice Retrieves and caches position parameters for liquidity operations
+     * @dev Fetches position data from NFT and constructs pool address
+     * @param positionId Position ID to get parameters for
+     * @return params Struct containing position's pool, tokens, fee, and tick range
+     */
     function _getIncreaseLiquidityParams(uint256 positionId) private view returns (IncreaseLiquidityParams memory params) {
         (,, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper,,,,,) = i_positionManager.positions(positionId);
         address pool = IUniswapV3Factory(i_factory).getPool(token0, token1, fee);
@@ -895,6 +1074,14 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
     }
 
+    /**
+     * @notice Gets human-readable price from pool's current tick
+     * @dev Converts sqrtPriceX96 to decimal-adjusted price (token1 per token0)
+     * @param pool Pool address
+     * @param token0 First token address
+     * @param token1 Second token address
+     * @return price Current price adjusted for token decimals
+     */
     function _getPriceFromPool(address pool, address token0, address token1) private view returns (uint256 price) {
         (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
         uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(currentTick);
@@ -908,6 +1095,19 @@ contract LPManager is Ownable, ReentrancyGuard {
         price = numerator / denominator;
     }
 
+    /**
+     * @notice Calculates unclaimed fees for a position using Uniswap V3 fee growth accounting
+     * @dev Implements Uniswap's fee growth algorithm considering tick position and range boundaries
+     * @param pool Pool address for fee growth data
+     * @param tickLower Lower tick of position range
+     * @param tickUpper Upper tick of position range
+     * @param liquidity Position's liquidity amount
+     * @param feeGrowthInside0LastX128 Last recorded fee growth for token0
+     * @param feeGrowthInside1LastX128 Last recorded fee growth for token1
+     * @return fee0 Unclaimed token0 fees
+     * @return fee1 Unclaimed token1 fees
+     * @custom:algorithm Handles three cases: tick below/inside/above position range
+     */
     function _calculateUnclaimedFees(
         address pool,
         int24 tickLower,
@@ -962,6 +1162,12 @@ contract LPManager is Ownable, ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Retrieves all position data from Uniswap position manager
+     * @dev Fetches complete position struct and maps to internal data structure
+     * @param positionId Position ID to query
+     * @return rawPositionData Complete position data including tokens, range, liquidity, and fees
+     */
     function _getRawPositionData(uint256 positionId) private view returns (RawPositionData memory rawPositionData) {
         (
             ,
@@ -991,6 +1197,12 @@ contract LPManager is Ownable, ReentrancyGuard {
         });
     }
 
+    /**
+     * @notice Calculates minimum acceptable swap output based on slippage tolerance
+     * @dev Applies configured slippage percentage to expected amount
+     * @param amount Expected swap output amount
+     * @return Minimum acceptable amount accounting for slippage
+     */
     function _getAmountOutMinimum(uint256 amount) private view returns (uint256) {
         return (amount * (BPS_DENOMINATOR - s_slippageBps)) / BPS_DENOMINATOR;
     }

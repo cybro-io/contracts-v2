@@ -16,6 +16,7 @@ contract LPManagerTest is Test {
     address public weth;
     address public wbtc;
     address public usdc;
+    address public swapRouter;
     address public wethUsdcPool;
     address public wbtcUsdcPool;
     uint256 public deployerKey;
@@ -38,7 +39,8 @@ contract LPManagerTest is Test {
     function setUp() public {
         DeployLPManager deployer = new DeployLPManager();
         (LPManagerInstance, helperConfig) = deployer.run();
-        (,,,,, weth, wbtc, usdc, deployerKey) = helperConfig.activeNetworkConfig();
+        (, swapRouter,,, deployerKey) = helperConfig.activeNetworkConfig();
+        (weth, wbtc, usdc) = helperConfig.getTokenMocks(swapRouter);
         UniswapV3PoolMock wethUsdcPoolMock = new UniswapV3PoolMock(weth, usdc, POOL_FEE);
         UniswapV3PoolMock wbtcUsdcPoolMock = new UniswapV3PoolMock(wbtc, usdc, POOL_FEE);
         

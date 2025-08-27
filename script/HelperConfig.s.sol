@@ -7,7 +7,6 @@ import {SwapRouterMock} from "../test/mocks/SwapRouterMock.sol";
 import {ERC20Mock} from "../test/mocks/ERC20Mock.sol";
 import {UniswapV3PoolMock} from "../test/mocks/IUniswapV3PoolMock.sol";
 import {UniswapV3FactoryMock} from "../test/mocks/UniswapV3FactoryMock.sol";
-import {QuoterMock} from "../test/mocks/QuoterMock.sol";
 
 contract HelperConfig is Script {
     NetworkConfig public activeNetworkConfig;
@@ -16,11 +15,7 @@ contract HelperConfig is Script {
         address positionManager;
         address swapRouter;
         address uniswapV3Factory;
-        address quoter;
         uint256 swapDeadlineBlocks;
-        address weth;
-        address wbtc;
-        address usdc;
         uint256 deployerKey;
     }
 
@@ -29,6 +24,8 @@ contract HelperConfig is Script {
     constructor() {
         if (block.chainid == 42161) {
             activeNetworkConfig = getArbitrumConfig();
+        } else if (block.chainid == 130) {
+            activeNetworkConfig = getUniConfig();
         } else {
             activeNetworkConfig = getOrCreateAnvilConfig();
         }
@@ -39,11 +36,17 @@ contract HelperConfig is Script {
             positionManager: 0xC36442b4a4522E871399CD717aBDD847Ab11FE88,
             swapRouter: 0xE592427A0AEce92De3Edee1F18E0157C05861564,
             uniswapV3Factory: 0x1F98431c8aD98523631AE4a59f267346ea31F984,
-            quoter: 0x61fFE014bA17989E743c5F6cB21bF9697530B21e,
             swapDeadlineBlocks: 600,
-            weth: 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1,
-            wbtc: 0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f,
-            usdc: 0xaf88d065e77c8cC2239327C5EDb3A432268e5831,
+            deployerKey: vm.envUint("PRIVATE_KEY")
+        });
+    }
+
+    function getUniConfig() public view returns (NetworkConfig memory uniNetworkConfig) {
+        uniNetworkConfig = NetworkConfig({
+            positionManager: 0x943e6e07a7E8E791dAFC44083e54041D743C46E9,
+            swapRouter: 0x73855d06DE49d0fe4A9c42636Ba96c62da12FF9C,
+            uniswapV3Factory: 0x1F98400000000000000000000000000000000003,
+            swapDeadlineBlocks: 600,
             deployerKey: vm.envUint("PRIVATE_KEY")
         });
     }
@@ -58,25 +61,30 @@ contract HelperConfig is Script {
         PositionManagerMock positionManager = new PositionManagerMock();
         SwapRouterMock swapRouter = new SwapRouterMock();
         UniswapV3FactoryMock uniswapV3FactoryMock = new UniswapV3FactoryMock();
-        QuoterMock quoter = new QuoterMock();
 
-        ERC20Mock wethMock = new ERC20Mock("WETH", "WETH", 18, msg.sender, 0);
-        ERC20Mock wbtcMock = new ERC20Mock("WBTC", "WBTC", 8, msg.sender, 0);
-        ERC20Mock usdcMock = new ERC20Mock("USDC", "USDC", 6, msg.sender, 0);
-        
-        swapRouter.setUp(address(wethMock), address(wbtcMock), address(usdcMock));
         vm.stopBroadcast();
 
         anvilNetworkConfig = NetworkConfig({
             positionManager: address(positionManager),
             swapRouter: address(swapRouter),
             uniswapV3Factory: address(uniswapV3FactoryMock),
-            quoter: address(quoter),
             swapDeadlineBlocks: 5,
-            weth: address(wethMock),
-            wbtc: address(wbtcMock),
-            usdc: address(usdcMock),
             deployerKey: DEFAULT_ANVIL_PRIVATE_KEY
         });
+    }
+
+    function getTokenMocks(address _swapRouter) public returns (address weth, address wbtc, address usdc) {
+        vm.startBroadcast();
+        ERC20Mock wethMock = new ERC20Mock("WETH", "WETH", 18, msg.sender, 0);
+        ERC20Mock wbtcMock = new ERC20Mock("WBTC", "WBTC", 8, msg.sender, 0);
+        ERC20Mock usdcMock = new ERC20Mock("USDC", "USDC", 6, msg.sender, 0);
+
+        SwapRouterMock swapRouter = SwapRouterMock(_swapRouter);
+
+        swapRouter.setUp(address(wethMock), address(wbtcMock), address(usdcMock));
+
+        vm.stopBroadcast();
+
+        return (address(wethMock), address(wbtcMock), address(usdcMock));
     }
 }
