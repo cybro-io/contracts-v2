@@ -16,3 +16,6 @@ remappings = [
 
 [etherscan]
 arbitrum = { key = "${ARBITRUM_SCAN_API_KEY}" }
+
+[profile.solx]
+solc_version = "/Users/mtony/Cybro/solx-macosx-v0.1.1"
