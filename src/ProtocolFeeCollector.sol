@@ -9,6 +9,13 @@ using SafeERC20 for IERC20;
 
 contract ProtocolFeeCollector is Ownable {
     ///////////////////
+    // Errors
+    ///////////////////
+    error ProtocolFeeCollector__NoEthToWithdraw();
+    error ProtocolFeeCollector__EthTransferFailed();
+    error ProtocolFeeCollector__NoTokensToWithdraw();
+
+    ///////////////////
     // Types
     ///////////////////
     enum FeeType {
@@ -78,9 +85,21 @@ contract ProtocolFeeCollector is Ownable {
         emit UpdatedProtocolFee(FeeType.DEPOSIT, feeBps);
     }
 
-    /// @notice withdraw fees
+    /**
+    * @notice Withdraws accumulated token fees from the contract
+    * @dev Transfers entire token balance to specified recipient
+    * @param tokenOut Token address to withdraw
+    * @param recipient Address to receive the tokens
+    * @custom:reverts ProtocolFeeCollector__NoTokensToWithdraw if no balance
+    * @custom:access Only owner can call this function
+    * @custom:emits WithdrawnProtocolFee on successful withdrawal
+    */
     function withdrawProtocolFees(address tokenOut, address recipient) external onlyOwner {
         uint256 amountTokenOut = IERC20(tokenOut).balanceOf(address(this));
+        if (amountTokenOut == 0) {
+            revert ProtocolFeeCollector__NoTokensToWithdraw();
+        }
+
         IERC20(tokenOut).safeTransfer(recipient, amountTokenOut);
         emit WithdrawnProtocolFee(tokenOut, recipient, amountTokenOut);
     }
@@ -93,10 +112,14 @@ contract ProtocolFeeCollector is Ownable {
      */
     function withdrawETH(address payable recipient) external onlyOwner {
         uint256 balance = address(this).balance;
-        require(balance > 0, "No ETH to withdraw");
-        
+        if (balance == 0) {
+            revert ProtocolFeeCollector__NoEthToWithdraw();
+        }
+
         (bool success, ) = recipient.call{value: balance}("");
-        require(success, "ETH transfer failed");
+        if (!success) {
+            revert ProtocolFeeCollector__EthTransferFailed();
+        }
         
         emit WithdrawnETH(recipient, balance);
     }
