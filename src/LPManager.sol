@@ -13,9 +13,6 @@ import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
-import {IQuoterV2} from "@uniswap/v3-periphery/contracts/interfaces/IQuoterV2.sol";
-import {PoolAddress} from "@uniswap/v3-periphery/contracts/libraries/PoolAddress.sol";
-import {OracleLibrary} from "@uniswap/v3-periphery/contracts/libraries/OracleLibrary.sol";
 import {ProtocolFeeCollector} from "./ProtocolFeeCollector.sol";
 
 
@@ -28,10 +25,8 @@ contract LPManager is Ownable, ReentrancyGuard {
 
     error LPManager__InvalidTokenIn(address tokenIn, address token0, address token1);
     error LPManager__InvalidTokenOut(address tokenOut, address token0, address token1);
-    error LPManager__NoPositions(address user);
     error LPManager__InvalidOwnership(uint256 positionId, address user);
     error LPManager__InvalidRange(int24 currentTick);
-    error LPManager__InvalidQuoteAmount();
     error LPManager__InvalidPool();
     error LPManager__InvalidPrice();
     error LPManager__NoFeesToCompound();
@@ -98,10 +93,13 @@ contract LPManager is Ownable, ReentrancyGuard {
     ///////////////////
     // State Variables
     ///////////////////
-    uint256 private constant BPS_DENOMINATOR = 10_000;
-    uint32 private constant SECONDS_AGO = 180;
-    uint256 private constant SQRT_PRICE_X96_DENOMINATOR = 2 ** 192;
-    uint256 constant DUST_THRESHOLD_BPS = 100;
+    uint256 private constant BPS_DENOMINATOR = 1e4;
+    uint256 private constant SQRT_PRICE_DENOMINATOR = 1 << 192;
+    uint256 private constant PRECISION_MULTIPLIER = 1e18;
+    uint256 private constant FEE_DENOMINATOR = 1e6;
+    uint256 private constant Q128 = 0x100000000000000000000000000000000;  // 2^128
+    uint256 private constant SLIPPAGE_BUFFER_PERCENTAGE = 98;
+    uint256 private constant PERCENTAGE_DENOMINATOR = 100;
 
     INonfungiblePositionManager public immutable i_positionManager;
     ISwapRouter public immutable i_swapRouter;
@@ -130,6 +128,7 @@ contract LPManager is Ownable, ReentrancyGuard {
     );
     event WithdrawnSingleToken(uint256 indexed positionId, address tokenOut, uint256 amount, uint256 amount0, uint256 amount1);
     event WithdrawnBothTokens(uint256 indexed positionId, address token0, address token1, uint256 amount0, uint256 amount1);
+    event SlippageBpsUpdated(uint16 slippageBps);
 
     ///////////////////
     // Modifiers
@@ -307,8 +306,8 @@ contract LPManager is Ownable, ReentrancyGuard {
      */
     function increaseLiquidity(uint256 positionId, address tokenIn, uint256 amountIn)
         external
-        isPositionOwner(positionId)
         nonReentrant
+        isPositionOwner(positionId)
         returns (uint256 added0, uint256 added1)
     {
         // Read position’s token0, token1 & fee from the NFT
@@ -440,6 +439,8 @@ contract LPManager is Ownable, ReentrancyGuard {
      */
     function setSlippageBps(uint16 _slippageBps) external onlyOwner {
         s_slippageBps = _slippageBps;
+
+        emit SlippageBpsUpdated(_slippageBps);
     }
 
     ///////////////////
@@ -499,7 +500,7 @@ contract LPManager is Ownable, ReentrancyGuard {
      * @return poolTokens Struct containing pool's token addresses and fee
      */
     function _decreaseLiquidity(uint256 positionId, uint256 bps) private returns (uint256 amount0, uint256 amount1, PoolTokens memory poolTokens) {
-        if (bps < 0 || bps > BPS_DENOMINATOR) {
+        if (bps > BPS_DENOMINATOR) {
             revert LPManager__InvalidBasisPoints();
         }
         
@@ -650,7 +651,7 @@ contract LPManager is Ownable, ReentrancyGuard {
             // Too much token0, swap excess
             uint256 toSwap = amount0 - desired0;
             // Only swap if excess is more than dust threshold
-            if (toSwap > (amount0 * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
+            if (toSwap > (amount0 * PERCENTAGE_DENOMINATOR / BPS_DENOMINATOR)) {
                 uint256 swapped = _swap(IUniswapV3Pool(pool).token0(), IUniswapV3Pool(pool).token1(), amount0 - desired0, pool);
                 return (desired0, amount1 + swapped);
             }
@@ -658,7 +659,7 @@ contract LPManager is Ownable, ReentrancyGuard {
             // Too much token1, swap excess
             uint256 toSwap = amount1 - desired1;
             // Only swap if excess is more than dust threshold
-            if (toSwap > (amount1 * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
+            if (toSwap > (amount1 * PERCENTAGE_DENOMINATOR / BPS_DENOMINATOR)) {
                 uint256 swapped = _swap(IUniswapV3Pool(pool).token1(), IUniswapV3Pool(pool).token0(), toSwap, pool);
                 return (amount0 + swapped, desired1);
             }
@@ -771,7 +772,7 @@ contract LPManager is Ownable, ReentrancyGuard {
      * @return amountOut Amount of tokenOut received (0 if dust refunded)
      */
     function _swapWithDustCheck(address tokenIn, address tokenOut, uint256 amountIn, address pool) private  returns (uint256 amountOut) {
-        if (amountIn > (amountIn * DUST_THRESHOLD_BPS / BPS_DENOMINATOR)) {
+        if (amountIn > (amountIn * PERCENTAGE_DENOMINATOR / BPS_DENOMINATOR)) {
             amountOut = _swap(tokenIn, tokenOut, amountIn, pool);
         } else {
             // Return dust as-is in original token
@@ -903,13 +904,13 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint256 swapPercentage;
         if (isToken0) {
             // We have token0, need to swap some to token1
-            swapPercentage = (positionInRange * 1e18) / rangeSize;
+            swapPercentage = (positionInRange * PRECISION_MULTIPLIER) / rangeSize;
         } else {
             // We have token1, need to swap some to token0
-            swapPercentage = ((rangeSize - positionInRange) * 1e18) / rangeSize;
+            swapPercentage = ((rangeSize - positionInRange) * PRECISION_MULTIPLIER) / rangeSize;
         }
         
-        return (amountIn * swapPercentage) / 1e18;
+        return (amountIn * swapPercentage) / PRECISION_MULTIPLIER;
     }
 
     /**
@@ -951,7 +952,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
         
         // Apply fee: amountIn after fee = amountIn * (1e6 - fee) / 1e6
-        uint256 amountInAfterFee = (amountIn * (1e6 - fee)) / 1e6;
+        uint256 amountInAfterFee = (amountIn * (FEE_DENOMINATOR - fee)) / FEE_DENOMINATOR;
         
         // Determine token order
         bool isToken0 = tokenIn < tokenOut;
@@ -961,18 +962,18 @@ contract LPManager is Ownable, ReentrancyGuard {
             expectedOut = FullMath.mulDiv(
                 amountInAfterFee,
                 uint256(sqrtPriceX96) * uint256(sqrtPriceX96),
-                1 << 192
+                SQRT_PRICE_DENOMINATOR
             );
         } else {
             // Converting token1 to token0
             expectedOut = FullMath.mulDiv(
                 amountInAfterFee,
-                1 << 192,
+                SQRT_PRICE_DENOMINATOR,
                 uint256(sqrtPriceX96) * uint256(sqrtPriceX96)
             );
         }
 
-        expectedOut = (expectedOut * 98) / 100;
+        expectedOut = (expectedOut * SLIPPAGE_BUFFER_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
         
         if (expectedOut == 0) {
             revert LPManager__InvalidPrice();
@@ -1090,7 +1091,7 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint8 decimals1 = IERC20Metadata(token1).decimals();
 
         uint256 numerator = uint256(sqrtPriceX96) * uint256(sqrtPriceX96) * (10 ** decimals0);
-        uint256 denominator = SQRT_PRICE_X96_DENOMINATOR * (10 ** decimals1);
+        uint256 denominator = SQRT_PRICE_DENOMINATOR * (10 ** decimals1);
     
         price = numerator / denominator;
     }
@@ -1152,12 +1153,12 @@ contract LPManager is Ownable, ReentrancyGuard {
             fee0 = FullMath.mulDiv(
                 uint256(feeGrowthInside0X128 - feeGrowthInside0LastX128),
                 liquidity,
-                0x100000000000000000000000000000000 // 2^128
+                Q128 // 2^128
             );
             fee1 = FullMath.mulDiv(
                 uint256(feeGrowthInside1X128 - feeGrowthInside1LastX128),
                 liquidity,
-                0x100000000000000000000000000000000 // 2^128
+                Q128 // 2^128
             );
         }
     }

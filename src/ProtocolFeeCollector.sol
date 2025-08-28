@@ -9,11 +9,6 @@ using SafeERC20 for IERC20;
 
 contract ProtocolFeeCollector is Ownable {
     ///////////////////
-    // Errors
-    ///////////////////
-    error FeeCollector__PermissionDenied();
-
-    ///////////////////
     // Types
     ///////////////////
     enum FeeType {
@@ -25,7 +20,7 @@ contract ProtocolFeeCollector is Ownable {
     ///////////////////
     // State Variables
     ///////////////////
-    uint256 private constant BASIS_POINTS = 10_000;
+    uint256 private constant BASIS_POINTS = 1e4;
     uint256 public s_liquidityProtocolFee;
     uint256 public s_feesProtocolFee;
     uint256 public s_depositProtocolFee;
@@ -36,6 +31,7 @@ contract ProtocolFeeCollector is Ownable {
     event UpdatedProtocolFees(uint256 liquidityProtocolFee, uint256 feesProtocolFee, uint256 depositProtocolFee);
     event UpdatedProtocolFee(FeeType indexed protocolFeeType, uint256 protocolFeeBps);
     event WithdrawnProtocolFee(address indexed token, address indexed recipient, uint256 amount);
+    event WithdrawnETH(address recipient, uint256 amount);
 
     ///////////////////
     // Functions
@@ -87,6 +83,22 @@ contract ProtocolFeeCollector is Ownable {
         uint256 amountTokenOut = IERC20(tokenOut).balanceOf(address(this));
         IERC20(tokenOut).safeTransfer(recipient, amountTokenOut);
         emit WithdrawnProtocolFee(tokenOut, recipient, amountTokenOut);
+    }
+
+    /**
+     * @notice Withdraws accumulated ETH fees from the contract
+     * @dev Transfers entire ETH balance to specified recipient
+     * @param recipient Address to receive the ETH
+     * @custom:access Only owner can call this function
+     */
+    function withdrawETH(address payable recipient) external onlyOwner {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to withdraw");
+        
+        (bool success, ) = recipient.call{value: balance}("");
+        require(success, "ETH transfer failed");
+        
+        emit WithdrawnETH(recipient, balance);
     }
 
     /// @notice receive ETH fees
