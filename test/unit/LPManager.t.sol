@@ -43,7 +43,7 @@ contract LPManagerTest is Test {
         (weth, wbtc, usdc) = helperConfig.getTokenMocks(swapRouter);
         UniswapV3PoolMock wethUsdcPoolMock = new UniswapV3PoolMock(weth, usdc, POOL_FEE);
         UniswapV3PoolMock wbtcUsdcPoolMock = new UniswapV3PoolMock(wbtc, usdc, POOL_FEE);
-        
+
         wethUsdcPool = address(wethUsdcPoolMock);
         wbtcUsdcPool = address(wbtcUsdcPoolMock);
         UniswapV3PoolMock(wethUsdcPool).setSlot0(SQRT_PRICE_X96, WETH_TICK_CURRENT);
@@ -149,9 +149,8 @@ contract LPManagerTest is Test {
         vm.startPrank(user1);
         int24 wethTickLower = 2250;
         int24 wethTickUpper = 2750;
-        (uint256 positionId,,,) = LPManagerInstance.createPosition(
-            wethUsdcPool, weth, STARTING_WETH_BALANCE, wethTickLower, wethTickUpper
-        );
+        (uint256 positionId,,,) =
+            LPManagerInstance.createPosition(wethUsdcPool, weth, STARTING_WETH_BALANCE, wethTickLower, wethTickUpper);
         (uint256 added0, uint256 added1) = LPManagerInstance.compoundFees(positionId);
         uint256 expectedWethUsdcPoolFees = (STARTING_WETH_BALANCE / 2) / 10 + (STARTING_WETH_BALANCE / 2) / 10;
 
@@ -164,9 +163,8 @@ contract LPManagerTest is Test {
         vm.startPrank(user1);
         int24 wethTickLower = 2250;
         int24 wethTickUpper = 2750;
-        (uint256 positionId,,,) = LPManagerInstance.createPosition(
-            wethUsdcPool, weth, STARTING_WETH_BALANCE, wethTickLower, wethTickUpper
-        );
+        (uint256 positionId,,,) =
+            LPManagerInstance.createPosition(wethUsdcPool, weth, STARTING_WETH_BALANCE, wethTickLower, wethTickUpper);
         vm.stopPrank();
 
         vm.startPrank(user2);
@@ -209,9 +207,8 @@ contract LPManagerTest is Test {
         vm.startPrank(user1);
         int24 wethTickLower = 2250;
         int24 wethTickUpper = 2750;
-        (uint256 positionId,,,) = LPManagerInstance.createPosition(
-            wethUsdcPool, weth, STARTING_WETH_BALANCE, wethTickLower, wethTickUpper
-        );
+        (uint256 positionId,,,) =
+            LPManagerInstance.createPosition(wethUsdcPool, weth, STARTING_WETH_BALANCE, wethTickLower, wethTickUpper);
 
         vm.expectRevert();
         LPManagerInstance.increaseLiquidity(positionId, wbtc, STARTING_WBTC_BALANCE / 2);

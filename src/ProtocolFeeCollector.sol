@@ -55,15 +55,11 @@ contract ProtocolFeeCollector is Ownable {
     ///////////////////
 
     /// @notice set all three types of fees at once
-    function setFees(
-        uint256 _liquidityFeeBps,
-        uint256 _feesFeeBps,
-        uint256 _depositFeeBps
-    ) external onlyOwner {
+    function setFees(uint256 _liquidityFeeBps, uint256 _feesFeeBps, uint256 _depositFeeBps) external onlyOwner {
         s_liquidityProtocolFee = _liquidityFeeBps;
         s_feesProtocolFee = _feesFeeBps;
         s_depositProtocolFee = _depositFeeBps;
-        
+
         emit UpdatedProtocolFees(_liquidityFeeBps, _feesFeeBps, _depositFeeBps);
     }
 
@@ -86,14 +82,14 @@ contract ProtocolFeeCollector is Ownable {
     }
 
     /**
-    * @notice Withdraws accumulated token fees from the contract
-    * @dev Transfers entire token balance to specified recipient
-    * @param tokenOut Token address to withdraw
-    * @param recipient Address to receive the tokens
-    * @custom:reverts ProtocolFeeCollector__NoTokensToWithdraw if no balance
-    * @custom:access Only owner can call this function
-    * @custom:emits WithdrawnProtocolFee on successful withdrawal
-    */
+     * @notice Withdraws accumulated token fees from the contract
+     * @dev Transfers entire token balance to specified recipient
+     * @param tokenOut Token address to withdraw
+     * @param recipient Address to receive the tokens
+     * @custom:reverts ProtocolFeeCollector__NoTokensToWithdraw if no balance
+     * @custom:access Only owner can call this function
+     * @custom:emits WithdrawnProtocolFee on successful withdrawal
+     */
     function withdrawProtocolFees(address tokenOut, address recipient) external onlyOwner {
         uint256 amountTokenOut = IERC20(tokenOut).balanceOf(address(this));
         if (amountTokenOut == 0) {
@@ -116,11 +112,11 @@ contract ProtocolFeeCollector is Ownable {
             revert ProtocolFeeCollector__NoEthToWithdraw();
         }
 
-        (bool success, ) = recipient.call{value: balance}("");
+        (bool success,) = recipient.call{value: balance}("");
         if (!success) {
             revert ProtocolFeeCollector__EthTransferFailed();
         }
-        
+
         emit WithdrawnETH(recipient, balance);
     }
 
@@ -145,13 +141,13 @@ contract ProtocolFeeCollector is Ownable {
     function calculateLiquidityProtocolFee(uint256 liquidity) external view returns (uint256) {
         return (liquidity * s_liquidityProtocolFee) / BASIS_POINTS;
     }
-    
+
     /// @notice Calculate fee from collected LP fees
     /// @dev for claimFee & compaundFee
     function calculateFeesProtocolFee(uint256 collectedAmount) external view returns (uint256) {
         return (collectedAmount * s_feesProtocolFee) / BASIS_POINTS;
     }
-    
+
     /// @notice Calculate fee from deposit amount
     /// @dev for createPosition & increaseLiquidity
     function calculateDepositProtocolFee(uint256 depositAmount) external view returns (uint256) {
