@@ -3,14 +3,14 @@ pragma solidity 0.8.30;
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
-using SafeERC20 for IERC20;
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 contract ProtocolFeeCollector is Ownable {
+    using SafeERC20 for IERC20Metadata;
     ///////////////////
     // Errors
     ///////////////////
+
     error ProtocolFeeCollector__NoEthToWithdraw();
     error ProtocolFeeCollector__EthTransferFailed();
     error ProtocolFeeCollector__NoTokensToWithdraw();
@@ -44,7 +44,7 @@ contract ProtocolFeeCollector is Ownable {
     // Functions
     ///////////////////
 
-    constructor(uint256 _liquidityFee, uint256 _feesFee, uint256 _depositFee) Ownable(msg.sender) {
+    constructor(uint256 _liquidityFee, uint256 _feesFee, uint256 _depositFee, address _owner) Ownable(_owner) {
         s_liquidityProtocolFee = _liquidityFee;
         s_feesProtocolFee = _feesFee;
         s_depositProtocolFee = _depositFee;
@@ -91,12 +91,12 @@ contract ProtocolFeeCollector is Ownable {
      * @custom:emits WithdrawnProtocolFee on successful withdrawal
      */
     function withdrawProtocolFees(address tokenOut, address recipient) external onlyOwner {
-        uint256 amountTokenOut = IERC20(tokenOut).balanceOf(address(this));
+        uint256 amountTokenOut = IERC20Metadata(tokenOut).balanceOf(address(this));
         if (amountTokenOut == 0) {
             revert ProtocolFeeCollector__NoTokensToWithdraw();
         }
 
-        IERC20(tokenOut).safeTransfer(recipient, amountTokenOut);
+        IERC20Metadata(tokenOut).safeTransfer(recipient, amountTokenOut);
         emit WithdrawnProtocolFee(tokenOut, recipient, amountTokenOut);
     }
 
@@ -133,7 +133,7 @@ contract ProtocolFeeCollector is Ownable {
         if (token == address(0)) {
             return address(this).balance;
         }
-        return IERC20(token).balanceOf(address(this));
+        return IERC20Metadata(token).balanceOf(address(this));
     }
 
     /// @notice Calculate fee from liquidity amount
