@@ -2,7 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
-import {LPManagerV2} from "../src/LPManagerV2.sol";
+import {LPManager} from "../src/LPManager.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
@@ -12,11 +12,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-abstract contract LPManagerV2Test is Test, DeployUtils {
+abstract contract LPManagerTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
 
-    LPManagerV2 public lpManager;
+    LPManager public lpManager;
     INonfungiblePositionManager public positionManager;
     ProtocolFeeCollector public protocolFeeCollector;
 
@@ -37,19 +38,16 @@ abstract contract LPManagerV2Test is Test, DeployUtils {
 
     InteractionInfo public interactionInfo;
 
-    // IUniswapV3Pool POOL_ETH_USDT = IUniswapV3Pool(0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36);
-
     function setUp() public virtual {
         admin = baseAdmin;
-        _deployLPManagerV2();
+        _deployLPManager();
         swapper = new Swapper();
     }
 
-    function _deployLPManagerV2() public {
+    function _deployLPManager() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        lpManager =
-            new LPManagerV2(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)), address(admin));
+        lpManager = new LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)), address(admin));
         vm.stopPrank();
     }
 
@@ -64,11 +62,13 @@ abstract contract LPManagerV2Test is Test, DeployUtils {
         vm.stopPrank();
     }
 
-    // function _provideAndApprove(bool needToProvide, IERC20Metadata asset_, uint256 amount_) internal {
-    //     _provideAndApproveSpecific(needToProvide, asset_, amount_);
-    // }
-
     // TESTS
+
+    modifier _assertZeroBalances() {
+        _;
+        vm.assertEq(interactionInfo.token0.balanceOf(address(lpManager)), 0);
+        vm.assertEq(interactionInfo.token1.balanceOf(address(lpManager)), 0);
+    }
 
     function baseline(address user_, uint256 amountIn0_, uint256 amountIn1_, IUniswapV3Pool pool_) public {
         interactionInfo = InteractionInfo({
@@ -91,13 +91,9 @@ abstract contract LPManagerV2Test is Test, DeployUtils {
         _provideAndApproveSpecific(true, interactionInfo.token1, amountIn1_, interactionInfo.from);
         increaseLiquidity(amountIn0_, amountIn1_, 1);
         console.log("LIQUIDITY INCREASED");
-        // make some swaps to get fees
-        // vm.expectRevert();
-        // compoundFees(positionId_, user_);
-        // // make some swaps to get fees
 
         // will claim zero fees
-        claimFees(0, 0, LPManagerV2.TransferInfoInToken.BOTH);
+        claimFees(0, 0, LPManager.TransferInfoInToken.BOTH);
         console.log("FEES CLAIMED");
         interactionInfo.tickLower = -195860;
         interactionInfo.tickUpper = -192060;
@@ -109,9 +105,9 @@ abstract contract LPManagerV2Test is Test, DeployUtils {
             uint256 sqrtPriceUpper = TickMath.getSqrtRatioAtTick(interactionInfo.tickUpper);
             uint256 newPrice;
             if (sqrtPriceUpper <= currentPrice) {
-                newPrice = sqrtPriceLower;
+                newPrice = Math.max(sqrtPriceLower, currentPrice - 1e23);
             } else {
-                newPrice = sqrtPriceUpper;
+                newPrice = Math.min(sqrtPriceUpper, currentPrice + 1e23);
             }
 
             for (uint256 i = 0; i < 2; i++) {
@@ -133,16 +129,18 @@ abstract contract LPManagerV2Test is Test, DeployUtils {
         compoundFees();
         console.log("COMPOUND FEES");
 
-        withdraw(5000, 0, 0, LPManagerV2.TransferInfoInToken.BOTH);
-        withdraw(2500, 0, 0, LPManagerV2.TransferInfoInToken.TOKEN0);
-        withdraw(2500, 0, 0, LPManagerV2.TransferInfoInToken.TOKEN1);
+        withdraw(5000, 0, 0, LPManager.TransferInfoInToken.BOTH);
+        withdraw(2500, 0, 0, LPManager.TransferInfoInToken.TOKEN0);
+        withdraw(10000, 0, 0, LPManager.TransferInfoInToken.TOKEN1);
     }
 
-    function createPosition(uint256 amountIn0_, uint256 amountIn1_, address recipient_, uint256 minLiquidity_) public {
-        // _deployLPManagerV2();
+    function createPosition(uint256 amountIn0_, uint256 amountIn1_, address recipient_, uint256 minLiquidity_)
+        public
+        _assertZeroBalances
+    {
         vm.startPrank(interactionInfo.from);
         vm.expectEmit(false, false, false, false, address(lpManager));
-        emit LPManagerV2.PositionCreated(0, 0, 0, 0, 0, 0, 0);
+        emit LPManager.PositionCreated(0, 0, 0, 0, 0, 0, 0);
         (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition(
             address(interactionInfo.pool),
             amountIn0_,
@@ -158,82 +156,124 @@ abstract contract LPManagerV2Test is Test, DeployUtils {
         console.log("liquidity", liquidity);
         console.log("amount0 after all", amount0);
         console.log("amount1 after all", amount1);
-        // other checks
+        console.log("amountIn0", amountIn0_);
+        console.log("amountIn1_", amountIn1_);
+
         vm.assertEq(positionManager.ownerOf(positionId), recipient_);
         vm.assertGt(liquidity, 0);
-        // vm.assertGt(amount0, 0);
-        // vm.assertGt(amount1, 0);
+        vm.assertLt(interactionInfo.token0.balanceOf(interactionInfo.from), amountIn0_ / 200);
+        vm.assertLt(interactionInfo.token1.balanceOf(interactionInfo.from), amountIn1_ / 200);
     }
 
-    function increaseLiquidity(uint256 amountIn0_, uint256 amountIn1_, uint128 minLiquidity_) public {
+    function increaseLiquidity(uint256 amountIn0_, uint256 amountIn1_, uint128 minLiquidity_)
+        public
+        _assertZeroBalances
+    {
         vm.startPrank(interactionInfo.from);
         vm.expectEmit(true, false, false, false, address(lpManager));
-        emit LPManagerV2.LiquidityIncreased(interactionInfo.positionId, 0, 0);
+        emit LPManager.LiquidityIncreased(interactionInfo.positionId, 0, 0);
         lpManager.increaseLiquidity(interactionInfo.positionId, amountIn0_, amountIn1_, minLiquidity_);
         vm.stopPrank();
     }
 
-    function claimFees(uint256 minAmountOut0_, uint256 minAmountOut1_, LPManagerV2.TransferInfoInToken transferIn)
+    function claimFees(uint256 minAmountOut0_, uint256 minAmountOut1_, LPManager.TransferInfoInToken transferIn)
         public
+        _assertZeroBalances
     {
-        // vm.emit();
+        // Expect revert for non-owner
+        vm.startPrank(user3);
+        vm.expectRevert(LPManager.NotPositionOwner.selector);
+        lpManager.claimFees(interactionInfo.positionId, user3, minAmountOut0_, minAmountOut1_);
+        vm.expectRevert(LPManager.NotPositionOwner.selector);
+        lpManager.claimFees(
+            interactionInfo.positionId, interactionInfo.from, address(interactionInfo.token1), minAmountOut1_
+        );
+        vm.stopPrank();
+
         vm.startPrank(interactionInfo.from);
-        if (transferIn == LPManagerV2.TransferInfoInToken.BOTH) {
-            // vm.expectEmit(true, false, false, false, address(lpManager));
-            // emit LPManagerV2.ClaimedFees(positionId_, 0, 0);
+        if (transferIn == LPManager.TransferInfoInToken.BOTH) {
+            vm.expectEmit(true, false, false, false, address(lpManager));
+            emit LPManager.ClaimedFees(interactionInfo.positionId, 0, 0);
             lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, minAmountOut0_, minAmountOut1_);
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
-            if (transferIn == LPManagerV2.TransferInfoInToken.TOKEN0) {
+            if (transferIn == LPManager.TransferInfoInToken.TOKEN0) {
                 tokenOut_ = interactionInfo.token0;
                 minAmountOut_ = minAmountOut0_;
             } else {
                 tokenOut_ = interactionInfo.token1;
                 minAmountOut_ = minAmountOut1_;
             }
-            // vm.expectEmit(true, false, false, false, address(lpManager));
-            // emit LPManagerV2.ClaimedFeesInToken(positionId_, tokenOut_, 0);
+            vm.expectEmit(true, false, false, false, address(lpManager));
+            emit LPManager.ClaimedFeesInToken(interactionInfo.positionId, address(tokenOut_), 0);
             lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, address(tokenOut_), minAmountOut_);
         }
         vm.stopPrank();
     }
 
-    function compoundFees() public {
+    function compoundFees() public _assertZeroBalances {
+        // Expect revert for non-owner
+        vm.startPrank(user3);
+        vm.expectRevert(LPManager.NotPositionOwner.selector);
+        lpManager.compoundFees(interactionInfo.positionId, 0);
+        vm.stopPrank();
+
         vm.startPrank(interactionInfo.from);
         vm.expectEmit(true, false, false, false, address(lpManager));
-        emit LPManagerV2.CompoundedFees(interactionInfo.positionId, 0, 0);
+        emit LPManager.CompoundedFees(interactionInfo.positionId, 0, 0);
         lpManager.compoundFees(interactionInfo.positionId, 0);
         vm.stopPrank();
     }
 
-    function moveRange() public {
-        // vm.emit();
-        vm.startPrank(interactionInfo.from);
-        vm.expectEmit(false, true, false, false, address(lpManager));
-        emit LPManagerV2.RangeMoved(0, interactionInfo.positionId, 0, 0, 0, 0);
-        (uint256 newPositionId_,, uint256 amount0_, uint256 amount1_) =
-            lpManager.moveRange(interactionInfo.positionId, interactionInfo.tickLower, interactionInfo.tickUpper);
+    function moveRange() public _assertZeroBalances {
+        // Expect revert for non-owner
+        vm.startPrank(user3);
+        vm.expectRevert(LPManager.NotPositionOwner.selector);
+        lpManager.moveRange(
+            interactionInfo.positionId, interactionInfo.from, interactionInfo.tickLower, interactionInfo.tickUpper
+        );
         vm.stopPrank();
+
+        vm.startPrank(interactionInfo.from);
+        LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        vm.expectEmit(false, true, false, false, address(lpManager));
+        emit LPManager.RangeMoved(0, interactionInfo.positionId, 0, 0, 0, 0);
+        (uint256 newPositionId_,, uint256 amount0_, uint256 amount1_) = lpManager.moveRange(
+            interactionInfo.positionId, interactionInfo.from, interactionInfo.tickLower, interactionInfo.tickUpper
+        );
+        vm.stopPrank();
+        vm.assertEq(positionManager.ownerOf(newPositionId_), interactionInfo.from);
         interactionInfo.positionId = newPositionId_;
+        LPManager.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
+        console.log("positionAfter.liquidity", positionAfter.liquidity);
+        console.log("position.liquidity", position.liquidity);
     }
 
     function withdraw(
-        uint96 percent_,
+        uint32 percent_,
         uint256 minAmountOut0_,
         uint256 minAmountOut1_,
-        LPManagerV2.TransferInfoInToken transferIn
-    ) public {
+        LPManager.TransferInfoInToken transferIn
+    ) public _assertZeroBalances {
+        // Expect revert for non-owner
+        vm.startPrank(user3);
+        vm.expectRevert(LPManager.NotPositionOwner.selector);
+        lpManager.withdraw(interactionInfo.positionId, percent_, interactionInfo.from, minAmountOut0_, minAmountOut1_);
+        vm.expectRevert(LPManager.NotPositionOwner.selector);
+        lpManager.withdraw(interactionInfo.positionId, percent_, user3, address(interactionInfo.token0), minAmountOut0_);
+        vm.stopPrank();
+
         vm.startPrank(interactionInfo.from);
-        uint96 percent; // 1e4 equals 100%
-        if (transferIn == LPManagerV2.TransferInfoInToken.BOTH) {
+        LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        if (transferIn == LPManager.TransferInfoInToken.BOTH) {
             lpManager.withdraw(
                 interactionInfo.positionId, percent_, interactionInfo.from, minAmountOut0_, minAmountOut1_
             );
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
-            if (transferIn == LPManagerV2.TransferInfoInToken.TOKEN0) {
+            if (transferIn == LPManager.TransferInfoInToken.TOKEN0) {
                 tokenOut_ = interactionInfo.token0;
                 minAmountOut_ = minAmountOut0_;
             } else {
@@ -245,10 +285,19 @@ abstract contract LPManagerV2Test is Test, DeployUtils {
             );
         }
         vm.stopPrank();
+        LPManager.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
+        console.log("positionAfter.liquidity", positionAfter.liquidity);
+        console.log("position.liquidity", position.liquidity);
+        console.log("percent_", percent_, "\n\n");
+        vm.assertApproxEqAbs(
+            positionAfter.liquidity,
+            position.liquidity * (lpManager.PRECISION() - percent_) / lpManager.PRECISION(),
+            position.liquidity / 200
+        );
     }
 }
 
-contract LPManagerV2TestBaseChain is LPManagerV2Test {
+contract LPManagerTestBaseChain is LPManagerTest {
     IUniswapV3Pool public pool;
 
     function setUp() public override {
@@ -258,10 +307,26 @@ contract LPManagerV2TestBaseChain is LPManagerV2Test {
         super.setUp();
     }
 
-    function test(uint256 amountIn0, uint256 amountIn1) public {
-        vm.assume(amountIn0 < 1e20 && amountIn0 > 1000);
-        vm.assume(amountIn1 < 1e20 && amountIn1 > 1000);
+    function test(uint256 amountIn0, uint256 amountIn1, int24 tickLower, int24 tickUpper) public {
+        vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
+        vm.assume(amountIn1 < 1e20 && amountIn1 > 1e4);
+        (, int24 currentTick,,,,,) = pool.slot0();
+        tickLower = int24(bound(tickLower, currentTick - 1e5, currentTick + 1e5));
+        tickUpper = int24(bound(tickUpper, currentTick - 1e5, currentTick + 1e5));
+        tickLower -= tickLower % pool.tickSpacing();
+        tickUpper -= tickUpper % pool.tickSpacing();
+        if (tickLower > tickUpper) {
+            (tickLower, tickUpper) = (tickUpper, tickLower);
+        }
         // zero values will be reverted
         baseline(user, amountIn0, amountIn1, pool);
     }
 }
+
+// contract LPManagerTestArnitrum is LPManagerTest {
+
+// }
+
+// contract LPManagerTestUnichain is LPManagerTest {
+
+// }
