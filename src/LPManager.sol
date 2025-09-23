@@ -2,122 +2,142 @@
 pragma solidity 0.8.30;
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
-import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
-import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
-import {ProtocolFeeCollector} from "./ProtocolFeeCollector.sol";
+import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
+import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
+import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
+import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v3-core/contracts/libraries/FixedPoint96.sol";
+import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.sol";
 
+/**
+ * @title LPManager
+ * @notice High-level helper contract for managing Uniswap V3 liquidity positions.
+ * @dev Wraps common flows: create position, claim fees (optionally in a single token),
+ *      compound fees back into the position, increase liquidity with auto-rebalancing of inputs,
+ *      move range by migrating liquidity, and withdraw in one or two tokens.
+ *      The contract assumes NFT ownership stays with the user. For actions that require
+ *      token/NFT movements, the user must approve allowances to this contract.
+ */
+contract LPManager is IUniswapV3SwapCallback {
+    using SafeERC20 for IERC20Metadata;
 
-using SafeERC20 for IERC20;
+    enum TransferInfoInToken {
+        BOTH,
+        TOKEN0,
+        TOKEN1
+    }
 
-contract LPManager is Ownable, ReentrancyGuard {
-    ///////////////////
-    // Errors
-    ///////////////////
-
-    error LPManager__InvalidTokenIn(address tokenIn, address token0, address token1);
-    error LPManager__InvalidTokenOut(address tokenOut, address token0, address token1);
-    error LPManager__InvalidOwnership(uint256 positionId, address user);
-    error LPManager__InvalidRange(int24 currentTick);
-    error LPManager__InvalidPool();
-    error LPManager__InvalidPrice();
-    error LPManager__NoFeesToCompound();
-    error LPManager__NoFeesToClaim();
-    error LPManager__AmountLessThanProtocolFee();
-    error LPManager__InvalidBasisPoints();
-
-    ///////////////////
-    // Types
-    ///////////////////
-
-    struct PoolTokens {
+    struct PoolInfo {
+        /// @notice Address of the Uniswap V3 pool contract
+        address pool;
+        /// @notice Address of token0 for the pool
         address token0;
+        /// @notice Address of token1 for the pool
         address token1;
+        /// @notice Pool fee tier in hundredths of a bip, e.g. 500, 3000, 10000
         uint24 fee;
     }
 
-    struct RebalanceParams {
-        address pool;
+    struct PositionContext {
+        PoolInfo poolInfo;
+        /// @notice Lower tick bound of the position
         int24 tickLower;
+        /// @notice Upper tick bound of the position
         int24 tickUpper;
-        uint256 amount0;
-        uint256 amount1;
-        PoolTokens poolTokens;
-    }
-
-    struct Position {
-        address pool;
-        uint24 feeTier;
-        address token0;
-        address token1;
-        uint128 liquidity;
-        uint256 unclaimedFee0;
-        uint256 unclaimedFee1;
-        uint128 claimedFee0;
-        uint128 claimedFee1;
-        int24 tickLower;
-        int24 tickUpper;
-        uint256 price;
     }
 
     struct RawPositionData {
+        /// @notice Position token0
         address token0;
+        /// @notice Position token1
         address token1;
+        /// @notice Pool fee tier
         uint24 fee;
+        /// @notice Lower tick bound of the position
         int24 tickLower;
+        /// @notice Upper tick bound of the position
         int24 tickUpper;
+        /// @notice Current liquidity of the position
         uint128 liquidity;
-        uint256 unclaimedFee0;
-        uint256 unclaimedFee1;
+        /// @notice Fee growth inside last snapshot for token0 (Q128.128)
+        uint256 feeGrowthInside0LastX128;
+        /// @notice Fee growth inside last snapshot for token1 (Q128.128)
+        uint256 feeGrowthInside1LastX128;
+        /// @notice Accrued but uncollected token0 (per Uniswap positions storage)
         uint128 claimedFee0;
+        /// @notice Accrued but uncollected token1 (per Uniswap positions storage)
         uint128 claimedFee1;
     }
 
-    struct IncreaseLiquidityParams {
+    struct Position {
+        /// @notice Pool address for this position
         address pool;
-        address token0;
-        address token1;
+        /// @notice Pool fee tier
         uint24 fee;
+        /// @notice token0 address
+        address token0;
+        /// @notice token1 address
+        address token1;
+        /// @notice Current position liquidity
+        uint128 liquidity;
+        /// @notice Calculated up-to-date unclaimed fee in token0
+        uint256 unclaimedFee0;
+        /// @notice Calculated up-to-date unclaimed fee in token1
+        uint256 unclaimedFee1;
+        /// @notice Previously accounted claimed token0 (tokensOwed0 in Uniswap storage)
+        uint128 claimedFee0;
+        /// @notice Previously accounted claimed token1 (tokensOwed1 in Uniswap storage)
+        uint128 claimedFee1;
+        /// @notice Lower tick bound
         int24 tickLower;
+        /// @notice Upper tick bound
         int24 tickUpper;
+        /// @notice Current human-readable price (token1 per token0) adjusted by decimals
+        uint256 price;
     }
 
-    ///////////////////
-    // State Variables
-    ///////////////////
-    uint256 private constant BPS_DENOMINATOR = 1e4;
-    uint256 private constant SQRT_PRICE_DENOMINATOR = 1 << 192;
-    uint256 private constant PRECISION_MULTIPLIER = 1e18;
-    uint256 private constant FEE_DENOMINATOR = 1e6;
-    uint256 private constant Q128 = 0x100000000000000000000000000000000;  // 2^128
-    uint256 private constant SLIPPAGE_BUFFER_PERCENTAGE = 98;
-    uint256 private constant PERCENTAGE_DENOMINATOR = 100;
+    struct Prices {
+        /// @notice Current sqrt price Q96 of the pool
+        uint160 current;
+        /// @notice Lower sqrt price bound Q96 of the position
+        uint160 lower;
+        /// @notice Upper sqrt price bound Q96 of the position
+        uint160 upper;
+    }
 
-    INonfungiblePositionManager public immutable i_positionManager;
-    ISwapRouter public immutable i_swapRouter;
-    address public immutable i_protocolFeeCollector;
-    address public immutable i_factory;
-    uint256 public immutable i_swap_deadline_blocks;
+    /*=========== Events ============*/
 
-    uint16 public s_slippageBps = 50;
-
-    ///////////////////
-    // Events
-    ///////////////////
-
-    event PositionCreated(uint256 indexed positionId, uint256 amount0, uint256 amount1, int24 tickLower, int24 tickUpper, uint256 price);
+    /// @notice Emitted when a position is created
+    /// @param positionId Newly minted position NFT id
+    /// @param liquidity Minted liquidity value
+    /// @param amount0 Actual amount of token0 supplied
+    /// @param amount1 Actual amount of token1 supplied
+    /// @param tickLower Lower tick boundary
+    /// @param tickUpper Upper tick boundary
+    /// @param price Current pool price (token1 per token0) at creation
+    event PositionCreated(
+        uint256 indexed positionId,
+        uint128 liquidity,
+        uint256 amount0,
+        uint256 amount1,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 price
+    );
+    /// @notice Emitted after fees are claimed in both tokens
     event ClaimedFees(uint256 indexed positionId, uint256 amount0, uint256 amount1);
+    /// @notice Emitted after fees are claimed in a single token (with internal swap)
     event ClaimedFeesInToken(uint256 indexed positionId, address indexed token, uint256 amount);
+    /// @notice Emitted after compounding fees back into the position
     event CompoundedFees(uint256 indexed positionId, uint256 amountToken0, uint256 amountToken1);
+    /// @notice Emitted after increasing liquidity
     event LiquidityIncreased(uint256 indexed positionId, uint256 amountToken0, uint256 amountToken1);
+    /// @notice Emitted after moving the range (migrating liquidity) to a new position
     event RangeMoved(
         uint256 indexed positionId,
         uint256 indexed oldPositionId,
@@ -126,353 +146,80 @@ contract LPManager is Ownable, ReentrancyGuard {
         uint256 amount0,
         uint256 amount1
     );
-    event WithdrawnSingleToken(uint256 indexed positionId, address tokenOut, uint256 amount, uint256 amount0, uint256 amount1);
-    event WithdrawnBothTokens(uint256 indexed positionId, address token0, address token1, uint256 amount0, uint256 amount1);
-    event SlippageBpsUpdated(uint16 slippageBps);
+    /// @notice Emitted after withdrawing to a single token
+    event WithdrawnSingleToken(
+        uint256 indexed positionId, address tokenOut, uint256 amount, uint256 amount0, uint256 amount1
+    );
+    /// @notice Emitted after withdrawing both tokens
+    event WithdrawnBothTokens(
+        uint256 indexed positionId, address token0, address token1, uint256 amount0, uint256 amount1
+    );
 
-    ///////////////////
-    // Modifiers
-    ///////////////////
-    modifier isPositionOwner(uint256 positionId) {
-        if (i_positionManager.ownerOf(positionId) != msg.sender) {
-            revert LPManager__InvalidOwnership(positionId, msg.sender);
-        }
+    /* ============ Errors ============ */
+
+    /// @notice Thrown when resulting liquidity is less than the user-provided minimum
+    error LiquidityLessThanMin();
+    /// @notice Thrown when token0 output is less than the user-provided minimum
+    error Amount0LessThanMin();
+    /// @notice Thrown when token1 output is less than the user-provided minimum
+    error Amount1LessThanMin();
+    /// @notice Thrown when output amount is less than the user-provided minimum
+    error AmountLessThanMin();
+    /// @notice Thrown when provided tokenOut is not a token of the pool
+    error InvalidTokenOut();
+    /// @notice Thrown by swap callback when deltas are invalid (no payment due)
+    error InvalidSwapCallbackDeltas();
+    /// @notice Thrown by swap callback when the caller is not the expected pool
+    error InvalidSwapCallbackCaller();
+    /// @notice Thrown when msg.sender is not the owner of the specified position
+    error NotPositionOwner();
+
+    /* ============ CONSTANTS ============ */
+
+    /// @notice Precision for calculations (basis points, 1e4 = 100%)
+    uint32 public constant PRECISION = 1e4;
+
+    /* ============ IMMUTABLE VARIABLES ============ */
+
+    INonfungiblePositionManager public immutable positionManager;
+    IProtocolFeeCollector public immutable protocolFeeCollector;
+    IUniswapV3Factory public immutable factory;
+
+    /* ============ CONSTRUCTOR ============ */
+
+    constructor(INonfungiblePositionManager _positionManager, IProtocolFeeCollector _protocolFeeCollector) {
+        positionManager = _positionManager;
+        protocolFeeCollector = _protocolFeeCollector;
+        factory = IUniswapV3Factory(_positionManager.factory());
+    }
+
+    modifier onlyPositionOwner(uint256 positionId) {
+        require(positionManager.ownerOf(positionId) == msg.sender, NotPositionOwner());
         _;
     }
 
-    ///////////////////
-    // Functions
-    ///////////////////
-
-    constructor(address _positionManager, address _swapRouter, address _factory, address _protocolFeeCollector, uint256 swapDeadlineBlocks) Ownable(msg.sender) {
-        i_positionManager = INonfungiblePositionManager(_positionManager);
-        i_swapRouter = ISwapRouter(_swapRouter);
-        i_protocolFeeCollector = _protocolFeeCollector;
-        i_factory = _factory;
-        i_swap_deadline_blocks = swapDeadlineBlocks;
-    }
-
-    ///////////////////
-    // External Functions
-    ///////////////////
+    /* ============ VIEW FUNCTIONS ============ */
 
     /**
-     * @notice Creates a new Uniswap V3 liquidity position from a single token deposit
-     * @dev Pulls tokenIn, deducts protocol fee, swaps to optimal ratio, and mints position NFT
-     * @param pool The Uniswap V3 pool address to create position in
-     * @param tokenIn The deposit token (must be pool's token0 or token1)
-     * @param amountIn Amount of tokenIn to deposit from caller
-     * @param tickLower Lower tick boundary of the price range
-     * @param tickUpper Upper tick boundary of the price range
-     * @return positionId The ID of the newly minted position NFT
-     * @return liquidity Amount of liquidity units minted
-     * @return amount0 Actual amount of token0 deposited into position
-     * @return amount1 Actual amount of token1 deposited into position
-     * @custom:reverts LPManager__InvalidTokenIn if tokenIn not in pool
-     * @custom:reverts LPManager__InvalidRange if range doesn't include current tick
-     * @custom:emits PositionCreated with position details and current price
-     */
-    function createPosition(address pool, address tokenIn, uint256 amountIn, int24 tickLower, int24 tickUpper)
-        external
-        nonReentrant
-        returns (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1)
-    {
-        // Figure out pool params
-        PoolTokens memory poolTokens = PoolTokens({
-            token0: IUniswapV3Pool(pool).token0(),
-            token1: IUniswapV3Pool(pool).token1(),
-            fee: IUniswapV3Pool(pool).fee()
-        });
-
-        if (tokenIn != poolTokens.token0 && tokenIn != poolTokens.token1) {
-            revert LPManager__InvalidTokenIn({tokenIn: tokenIn, token0: poolTokens.token0, token1: poolTokens.token1});
-        }
-
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
-        if (tickLower > currentTick || tickUpper < currentTick) {
-            revert LPManager__InvalidRange({currentTick: currentTick});
-        }
-
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
-        amountIn = _collectDepositProtocolFee(tokenIn, amountIn);
-
-        amount0 = tokenIn == poolTokens.token0 ? amountIn : 0;
-        amount1 = tokenIn == poolTokens.token1 ? amountIn : 0;
-
-        RebalanceParams memory params = RebalanceParams({
-            pool: pool,
-            amount0: amount0,
-            amount1: amount1,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            poolTokens: poolTokens
-        });
-        
-        (positionId, liquidity, amount0, amount1) = _openPosition(params);
-
-        uint256 price = _getPriceFromPool(pool, poolTokens.token0, poolTokens.token1);
-        emit PositionCreated(positionId, amount0, amount1, tickLower, tickUpper, price);
-    }
-
-    /**
-     * @notice Claims accumulated trading fees from a liquidity position
-     * @dev Collects fees, deducts protocol fees, and transfers net amounts to caller
-     * @param positionId The unique identifier of the liquidity position
-     * @return amount0 Net amount of token0 fees after protocol fee deduction
-     * @return amount1 Net amount of token1 fees after protocol fee deduction
-     * @custom:reverts LPManager__NoFeesToClaim if no fees available
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
-     * @custom:emits ClaimedFees on successful fee claim
-     */
-    function claimFees(uint256 positionId) external nonReentrant returns (uint256 amount0, uint256 amount1) {
-        address token0;
-        address token1;
-        (token0, token1, amount0, amount1) = _claimFees(positionId);
-        if (amount0 == 0 && amount1 == 0) {
-            revert LPManager__NoFeesToClaim();
-        }
-        amount0 = _collectFeesProtocolFee(token0, amount0);
-        amount1 = _collectFeesProtocolFee(token1, amount1);
-        IERC20(token0).safeTransfer(msg.sender, amount0);
-        IERC20(token1).safeTransfer(msg.sender, amount1);
-        emit ClaimedFees(positionId, amount0, amount1);
-    }
-
-    /**
-     * @notice Claims accumulated fees from a position and converts them to a single token
-     * @dev Collects fees, swaps them to specified token, deducts protocol fees, and transfers to caller
-     * @param positionId The unique identifier of the liquidity position
-     * @param tokenOut The target token to receive all fees in
-     * @return amountTokenOut Net amount of tokenOut received after swaps and protocol fee deduction
-     * @custom:reverts LPManager__NoFeesToClaim if no fees available after swaps
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
-     * @custom:emits ClaimedFeesInToken on successful fee claim and conversion
-     */
-    function claimFeesInToken(uint256 positionId, address tokenOut) external nonReentrant returns (uint256 amountTokenOut) {
-        amountTokenOut = _claimFeesTokenOut(positionId, tokenOut);
-        if (amountTokenOut == 0) {
-            revert LPManager__NoFeesToClaim();
-        }
-        amountTokenOut = _collectFeesProtocolFee(tokenOut, amountTokenOut);
-        IERC20(tokenOut).safeTransfer(msg.sender, amountTokenOut);
-        emit ClaimedFeesInToken(positionId, tokenOut, amountTokenOut);
-    }
-
-    /**
-     * @notice Compounds accumulated fees back into the liquidity position
-     * @dev Collects fees, deducts protocol fees, rebalances tokens, and adds liquidity to position
-     * @param positionId The unique identifier of the liquidity position to compound
-     * @return added0 Amount of token0 actually added to the position as liquidity
-     * @return added1 Amount of token1 actually added to the position as liquidity
-     * @custom:reverts LPManager__NoFeesToCompound if no fees available to compound
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
-     * @custom:emits CompoundedFees when fees are successfully compounded
-     * @custom:gas-optimization Automatically rebalances tokens to optimal ratio for the position's range
-     */
-    function compoundFees(uint256 positionId) external isPositionOwner(positionId) returns (uint256 added0, uint256 added1) {
-        // Claim fees into LPManager contract
-        IncreaseLiquidityParams memory params = _getIncreaseLiquidityParams(positionId);
-        INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
-            tokenId: positionId,
-            recipient: address(this),
-            amount0Max: type(uint128).max,
-            amount1Max: type(uint128).max
-        });
-        (uint256 amountToken0, uint256 amountToken1) = i_positionManager.collect(collectParams);
-
-        if (amountToken0 == 0 && amountToken1 == 0) {
-            revert LPManager__NoFeesToCompound();
-        }
-
-        amountToken0 = _collectFeesProtocolFee(params.token0, amountToken0);
-        amountToken1 = _collectFeesProtocolFee(params.token1, amountToken1);
-        // Call increase position liquidity
-        (added0, added1) = _increaseLiquidity(positionId, amountToken0, amountToken1, params);
-
-        emit CompoundedFees(positionId, added0, added1);
-    }
-
-    /**
-     * @notice Increases liquidity in an existing position using a single token deposit
-     * @dev Pulls tokenIn from caller, deducts protocol fee, and adds liquidity via optimal swapping
-     * @param positionId The ID of the position NFT to increase
-     * @param tokenIn The deposit token (must be token0 or token1 of the position)
-     * @param amountIn Amount of tokenIn to deposit from caller
-     * @return added0 Actual amount of token0 added as liquidity
-     * @return added1 Actual amount of token1 added as liquidity
-     * @custom:reverts LPManager__InvalidTokenIn if tokenIn is not position's token0 or token1
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
-     * @custom:emits LiquidityIncreased on successful liquidity addition
-     */
-    function increaseLiquidity(uint256 positionId, address tokenIn, uint256 amountIn)
-        external
-        nonReentrant
-        isPositionOwner(positionId)
-        returns (uint256 added0, uint256 added1)
-    {
-        // Read position’s token0, token1 & fee from the NFT
-        IncreaseLiquidityParams memory params = _getIncreaseLiquidityParams(positionId);
-        if (tokenIn != params.token0 && tokenIn != params.token1) {
-            revert LPManager__InvalidTokenIn(tokenIn, params.token0, params.token1);
-        }
-
-        // Pull in the deposit token
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
-        amountIn = _collectDepositProtocolFee(tokenIn, amountIn);
-
-        // Approve the NonfungiblePositionManager to pull token
-        _ensureAllowance(IERC20(tokenIn), address(i_positionManager), amountIn);
-
-        // Call increaseLiquidity on the position NFT
-        uint256 amount0 = tokenIn == params.token0 ? amountIn : 0;
-        uint256 amount1 = tokenIn == params.token1 ? amountIn : 0;
-        (added0, added1) = _increaseLiquidity(positionId, amount0, amount1, params);
-
-        emit LiquidityIncreased(positionId, added0, added1);
-    }
-
-    /**
-     * @notice Moves an existing position to a new price range, recycling all liquidity and fees
-     * @dev Closes old position, collects all tokens/fees, deducts protocol fees, and creates new position
-     * @param pool The Uniswap V3 pool address for the new position
-     * @param positionId The existing position ID to move
-     * @param newLower Lower tick boundary of the new price range
-     * @param newUpper Upper tick boundary of the new price range
-     * @return newPositionId The ID of the newly created position NFT
-     * @return amount0 Actual amount of token0 deposited into new position
-     * @return amount1 Actual amount of token1 deposited into new position
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
-     * @custom:emits RangeMoved with old and new position details
-     */
-    function moveRange(address pool, uint256 positionId, int24 newLower, int24 newUpper)
-        external
-        nonReentrant
-        returns (uint256 newPositionId, uint256 amount0, uint256 amount1)
-    {
-        PoolTokens memory poolTokens;
-        (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId, BPS_DENOMINATOR);
-        amount0 = _collectLiquidityProtocolFee(poolTokens.token0, amount0);
-        amount1 = _collectLiquidityProtocolFee(poolTokens.token1, amount1);
-        RebalanceParams memory params = RebalanceParams({
-            pool: pool,
-            tickLower: newLower,
-            tickUpper: newUpper,
-            amount0: amount0,
-            amount1: amount1,
-            poolTokens: poolTokens
-        });
-
-        uint128 liquidity;
-        (newPositionId, liquidity, amount0, amount1) = _openPosition(params);
-        emit RangeMoved(newPositionId, positionId, newLower, newUpper, amount0, amount1);
-    }
-
-    /**
-     * @notice Withdraws liquidity from a position with optional single-token conversion
-     * @dev Removes specified liquidity percentage, deducts protocol fees, optionally swaps to tokenOut
-     * @param positionId The position ID to withdraw from
-     * @param tokenOut Target token address, or address(0) to receive both tokens
-     * @param bps Percentage to withdraw in basis points (10000 = 100%)
-     * @return amount0 Amount of token0 withdrawn (0 if swapped to token1)
-     * @return amount1 Amount of token1 withdrawn (0 if swapped to token0)
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position
-     * @custom:reverts LPManager__InvalidTokenOut if tokenOut not in pool
-     * @custom:reverts LPManager__InvalidBasisPoints if bps > 10000
-     * @custom:emits WithdrawnBothTokens or WithdrawnSingleToken based on tokenOut
-     */
-    function withdraw(uint256 positionId, address tokenOut, uint256 bps) external returns (uint256 amount0, uint256 amount1) {
-        PoolTokens memory poolTokens;
-        (amount0, amount1, poolTokens) = _decreaseLiquidity(positionId, bps);
-        address pool = IUniswapV3Factory(i_factory).getPool(poolTokens.token0, poolTokens.token1, poolTokens.fee);
-
-        if (tokenOut != address(0) && tokenOut != poolTokens.token0 && tokenOut != poolTokens.token1) {
-            revert LPManager__InvalidTokenOut(tokenOut, poolTokens.token0, poolTokens.token1);
-        }
-
-        if (tokenOut == address(0)) {
-            if (amount0 > 0) {
-                amount0 = _collectLiquidityProtocolFee(poolTokens.token0, amount0);
-                IERC20(poolTokens.token0).safeTransfer(msg.sender, amount0);
-            }
-            if (amount1 > 0) {
-                amount1 = _collectLiquidityProtocolFee(poolTokens.token1, amount1);
-                IERC20(poolTokens.token1).safeTransfer(msg.sender, amount1);
-            }
-            emit WithdrawnBothTokens(positionId, poolTokens.token0, poolTokens.token1, amount0, amount1);
-            return (amount0, amount1);
-        }
-
-        uint256 totalOut = 0;
-
-        if (amount0 > 0) {
-            if (tokenOut == poolTokens.token0) {
-                totalOut += amount0;
-            } else {
-                totalOut += _swapWithDustCheck(poolTokens.token0, tokenOut, amount0, pool);
-            }
-        }
-
-        if (amount1 > 0) {
-            if (tokenOut == poolTokens.token1) {
-                totalOut += amount1;
-            } else {
-                totalOut += _swapWithDustCheck(poolTokens.token1, tokenOut, amount1, pool);
-            }
-        }
-
-        totalOut = _collectLiquidityProtocolFee(tokenOut, totalOut);
-        IERC20(tokenOut).safeTransfer(msg.sender, totalOut);
-        emit WithdrawnSingleToken(positionId, tokenOut, totalOut, amount0, amount1);
-
-        if (tokenOut == poolTokens.token0) {
-            return (totalOut, 0);
-        } else {
-            return (0, totalOut);
-        }
-    }
-
-    /**
-     * @notice Updates the slippage tolerance for swaps
-     * @dev Sets maximum acceptable slippage in basis points (e.g., 300 = 3%)
-     * @param _slippageBps New slippage tolerance in basis points
-     * @custom:access Only callable by contract owner
-     */
-    function setSlippageBps(uint16 _slippageBps) external onlyOwner {
-        s_slippageBps = _slippageBps;
-
-        emit SlippageBpsUpdated(_slippageBps);
-    }
-
-    ///////////////////
-    // External View Functions
-    ///////////////////
-
-    /**
-     * @notice Retrieves comprehensive position information for a Uniswap V3 position
-     * @dev Calculates real-time data including current amounts, unclaimed fees, and pool state
-     * @param positionId The position NFT ID to query
-     * @return position Complete position data struct with the following fields:
-     * - pool: Uniswap V3 pool contract address
-     * - feeTier: Pool fee tier (e.g., 500, 3000, 10000)
-     * - token0: First token address in the pair
-     * - token1: Second token address in the pair
-     * - liquidity: Current position liquidity amount
-     * - unclaimedFee0: Unclaimed token0 fees
-     * - unclaimedFee1: Unclaimed token1 fees  
-     * - claimedFee0: Previously claimed token0 fees
-     * - claimedFee1: Previously claimed token1 fees
-     * - tickLower: Lower price range boundary
-     * - tickUpper: Upper price range boundary
-     * - price: Current pool price (token1 per token0)
+     * @notice Returns a comprehensive snapshot of a position including live unclaimed fees and current price
+     * @param positionId The Uniswap V3 position token id
+     * @return position A populated Position struct with pool, tokens, liquidity, fees and price
      */
     function getPosition(uint256 positionId) external view returns (Position memory position) {
         RawPositionData memory rawData = _getRawPositionData(positionId);
-        address pool = IUniswapV3Factory(i_factory).getPool(rawData.token0, rawData.token1, rawData.fee);
-        (uint256 unclaimedFee0, uint256 unclamedFee1) = _calculateUnclaimedFees(pool, rawData.tickLower, rawData.tickUpper, rawData.liquidity, rawData.unclaimedFee0, rawData.unclaimedFee1);
+        address poolAddress = _getPool(rawData.token0, rawData.token1, rawData.fee);
+        (uint256 unclaimedFee0, uint256 unclamedFee1) = _calculateUnclaimedFees(
+            poolAddress,
+            rawData.tickLower,
+            rawData.tickUpper,
+            rawData.liquidity,
+            rawData.feeGrowthInside0LastX128,
+            rawData.feeGrowthInside1LastX128
+        );
 
         position = Position({
-            pool: pool,
-            feeTier: rawData.fee,
+            pool: poolAddress,
+            fee: rawData.fee,
             token0: rawData.token0,
             token1: rawData.token1,
             liquidity: rawData.liquidity,
@@ -482,685 +229,258 @@ contract LPManager is Ownable, ReentrancyGuard {
             claimedFee1: rawData.claimedFee1,
             tickLower: rawData.tickLower,
             tickUpper: rawData.tickUpper,
-            price: _getPriceFromPool(pool, rawData.token0, rawData.token1)
-        });
-    }
-
-    ///////////////////
-    // Private Functions
-    ///////////////////
-    
-    /**
-     * @notice Internal function to remove liquidity and collect tokens from position
-     * @dev Calculates liquidity amount to remove and collects both principal and fees
-     * @param positionId The position to decrease
-     * @param bps Basis points of liquidity to remove
-     * @return amount0 Token0 amount collected
-     * @return amount1 Token1 amount collected
-     * @return poolTokens Struct containing pool's token addresses and fee
-     */
-    function _decreaseLiquidity(uint256 positionId, uint256 bps) private returns (uint256 amount0, uint256 amount1, PoolTokens memory poolTokens) {
-        if (bps > BPS_DENOMINATOR) {
-            revert LPManager__InvalidBasisPoints();
-        }
-        
-        // Read current position data
-        (,, address token0, address token1, uint24 fee,,, uint128 currentLiquidity,,,,) = i_positionManager.positions(positionId);
-        
-        // Collect both principal + fees
-        uint128 liquidityToRemove = bps == BPS_DENOMINATOR 
-            ? currentLiquidity
-            : uint128((currentLiquidity * bps) / BPS_DENOMINATOR);
-        
-        (amount0, amount1) = _withdraw(positionId, liquidityToRemove);
-
-        // Swap any surplus into deficit to hit the 0/1 ratio exactly
-        poolTokens = PoolTokens({
-            token0: token0,
-            token1: token1,
-            fee: fee
+            price: _getPriceFromPool(poolAddress, rawData.token0, rawData.token1)
         });
     }
 
     /**
-     * @notice Internal function to decrease liquidity and collect all available tokens
-     * @dev Removes specified liquidity amount and collects both principal and accumulated fees
-     * @param positionId The position to withdraw from
-     * @param currentLiquidity Amount of liquidity to remove
-     * @return amount0 Total token0 collected (principal + fees)
-     * @return amount1 Total token1 collected (principal + fees)
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position (via modifier)
-     */
-    function _withdraw(uint256 positionId, uint128 currentLiquidity)
-        private
-        isPositionOwner(positionId)
-        returns (uint256 amount0, uint256 amount1)
-    {
-        // Remove all liquidity
-        i_positionManager.decreaseLiquidity(
-            INonfungiblePositionManager.DecreaseLiquidityParams({
-                tokenId: positionId,
-                liquidity: currentLiquidity,
-                amount0Min: 0,
-                amount1Min: 0,
-                deadline: block.timestamp + i_swap_deadline_blocks
-            })
-        );
-
-        // Collect both principal + fees
-        INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
-            tokenId: positionId,
-            recipient: address(this),
-            amount0Max: type(uint128).max,
-            amount1Max: type(uint128).max
-        });
-        (amount0, amount1) = i_positionManager.collect(collectParams);
-    }
-
-    /**
-     * @notice Internal function to add liquidity to an existing position
-     * @dev Handles token rebalancing and optimal swapping before increasing position liquidity
-     * @param positionId The position to increase liquidity for
-     * @param amount0 Available amount of token0 to add
-     * @param amount1 Available amount of token1 to add
-     * @param params Cached position parameters including tokens, pool, and tick range
-     * @return addedAmount0 Actual amount of token0 added to position
-     * @return addedAmount1 Actual amount of token1 added to position
-     * @custom:optimization Automatically swaps tokens to match position's tick range ratio
-     * @custom:dust-handling Refunds any leftover tokens after liquidity addition
-     */
-    function _increaseLiquidity(
-        uint256 positionId,
-        uint256 amount0,
-        uint256 amount1,
-        IncreaseLiquidityParams memory params
-    )
-        private
-        returns (uint256 addedAmount0, uint256 addedAmount1)
-    {
-        // Special case: if we only have one token
-        if (amount0 == 0 || amount1 == 0) {
-            // Use the same logic as createPosition
-            uint256 optimalSwapAmount = _findOptimalSwapAmount(
-                params.pool,
-                amount0 > 0 ? params.token0 : params.token1,
-                amount0 > 0 ? amount0 : amount1,
-                params.tickLower,
-                params.tickUpper
-            );
-            
-            if (amount0 == 0) {
-                uint256 swapped = _swap(params.token1, params.token0, optimalSwapAmount, params.pool);
-                amount0 = swapped;
-                amount1 = amount1 - optimalSwapAmount;
-            } else {
-                uint256 swapped = _swap(params.token0, params.token1, optimalSwapAmount, params.pool);
-                amount1 = swapped;
-                amount0 = amount0 - optimalSwapAmount;
-            }
-        } else {
-            // We have both tokens - need to rebalance to match the range ratio
-            (amount0, amount1) = _rebalanceToRangeRatio(
-                params.pool,
-                amount0,
-                amount1,
-                params.tickLower,
-                params.tickUpper
-            );
-        }
-        
-        // Call increaseLiquidity on the position NFT
-        (, addedAmount0, addedAmount1) = i_positionManager.increaseLiquidity(
-            INonfungiblePositionManager.IncreaseLiquidityParams({
-                tokenId: positionId,
-                amount0Desired: amount0,
-                amount1Desired: amount1,
-                amount0Min: 0,
-                amount1Min: 0,
-                deadline: block.timestamp + i_swap_deadline_blocks
-            })
-        );
-
-        // Refund any leftover "dust"
-        _refundDust(params.token0, params.token1, addedAmount0, addedAmount1, amount0, amount1);
-    }
-
-    /**
-     * @notice Rebalances token amounts to match optimal ratio for a given price range
-     * @dev Calculates desired ratio and swaps excess tokens, with dust threshold protection
-     * @param pool The Uniswap V3 pool address
-     * @param amount0 Current amount of token0 available
-     * @param amount1 Current amount of token1 available
-     * @param tickLower Lower tick of the target range
-     * @param tickUpper Upper tick of the target range
-     * @return newAmount0 Rebalanced amount of token0
-     * @return newAmount1 Rebalanced amount of token1
-     * @custom:optimization Skips swaps below dust threshold to avoid failed transactions
-     */
-    function _rebalanceToRangeRatio(
-        address pool,
-        uint256 amount0,
-        uint256 amount1,
-        int24 tickLower,
-        int24 tickUpper
-    ) private returns (uint256 newAmount0, uint256 newAmount1) {
-        (uint256 desired0, uint256 desired1) = _getRangeAmounts(pool, amount0, amount1, tickLower, tickUpper);
-    
-        // Swap excess of whichever token we have too much of
-        if (amount0 > desired0) {
-            // Too much token0, swap excess
-            uint256 toSwap = amount0 - desired0;
-            // Only swap if excess is more than dust threshold
-            if (toSwap > (amount0 * PERCENTAGE_DENOMINATOR / BPS_DENOMINATOR)) {
-                uint256 swapped = _swap(IUniswapV3Pool(pool).token0(), IUniswapV3Pool(pool).token1(), amount0 - desired0, pool);
-                return (desired0, amount1 + swapped);
-            }
-        } else if (amount1 > desired1) {
-            // Too much token1, swap excess
-            uint256 toSwap = amount1 - desired1;
-            // Only swap if excess is more than dust threshold
-            if (toSwap > (amount1 * PERCENTAGE_DENOMINATOR / BPS_DENOMINATOR)) {
-                uint256 swapped = _swap(IUniswapV3Pool(pool).token1(), IUniswapV3Pool(pool).token0(), toSwap, pool);
-                return (amount0 + swapped, desired1);
-            }
-        }
-        
-        // Already balanced
-        return (amount0, amount1);
-    }
-
-    /**
-     * @notice Refunds unused token amounts back to the caller
-     * @dev Transfers any leftover tokens that weren't used in liquidity operations
-     * @param token0 Address of token0
-     * @param token1 Address of token1
-     * @param usedAmount0 Amount of token0 actually used
-     * @param usedAmount1 Amount of token1 actually used
-     * @param totalAmount0 Total amount of token0 available
-     * @param totalAmount1 Total amount of token1 available
-     */
-    function _refundDust(address token0, address token1, uint256 usedAmount0, uint256 usedAmount1, uint256 totalAmount0, uint256 totalAmount1) private {
-        if (totalAmount0 > usedAmount0) {
-            IERC20(token0).safeTransfer(msg.sender, totalAmount0 - usedAmount0);
-        }
-        if (totalAmount1 > usedAmount1) {
-            IERC20(token1).safeTransfer(msg.sender, totalAmount1 - usedAmount1);
-        }
-    }
-
-    /**
-     * @notice Internal function to collect and convert fees to a single token
-     * @dev Collects raw fees from position manager and swaps both tokens to tokenOut if needed
-     * @param positionId The position to collect fees from
-     * @param tokenOut The token to convert all fees into
-     * @return amountTokenOut Total amount of tokenOut obtained from fee collection and swaps
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position (via modifier)
-     * @custom:gas-optimization Uses dust check to avoid failed swaps on small amounts
-     */
-    function _claimFeesTokenOut(uint256 positionId, address tokenOut)
-        private
-        isPositionOwner(positionId)
-        returns (uint256 amountTokenOut)
-    {
-        // get position params
-        (,, address token0, address token1, uint24 fee,,,,,,,) = i_positionManager.positions(positionId);
-        address pool = IUniswapV3Factory(i_factory).getPool(token0, token1, fee);
-
-        // Collect all fees into this contract
-        INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
-            tokenId: positionId,
-            recipient: address(this),
-            amount0Max: type(uint128).max,
-            amount1Max: type(uint128).max
-        });
-        (uint256 amountToken0, uint256 amountToken1) = i_positionManager.collect(collectParams);
-
-        // Swap fees into tokenOut
-        amountTokenOut = 0;
-        if (amountToken0 > 0) {
-            if (token0 == tokenOut) {
-                amountTokenOut += amountToken0;
-            } else {
-                amountTokenOut += _swapWithDustCheck(token0, tokenOut, amountToken0, pool);
-            }
-        }
-
-        if (amountToken1 > 0) {
-            if (token1 == tokenOut) {
-                amountTokenOut += amountToken1;
-            } else {
-                amountTokenOut += _swapWithDustCheck(token1, tokenOut, amountToken1, pool);
-            }
-        }
-    }
-
-    /**
-     * @notice Internal function to collect raw fees from Uniswap position manager
-     * @dev Retrieves position tokens and collects all available fees to this contract
-     * @param positionId The position to collect fees from
-     * @return token0 Address of the first token in the pair
-     * @return token1 Address of the second token in the pair  
-     * @return amountToken0 Raw amount of token0 fees collected
-     * @return amountToken1 Raw amount of token1 fees collected
-     * @custom:reverts LPManager__InvalidOwnership if caller doesn't own position (via modifier)
-     */
-    function _claimFees(uint256 positionId)
-        private
-        isPositionOwner(positionId)
-        returns (address token0, address token1, uint256 amountToken0, uint256 amountToken1)
-    {
-        // get position params
-        (,, token0, token1,,,,,,,,) = i_positionManager.positions(positionId);
-
-        // Collect all fees into this contract
-        INonfungiblePositionManager.CollectParams memory collectParams = INonfungiblePositionManager.CollectParams({
-            tokenId: positionId,
-            recipient: address(this),
-            amount0Max: type(uint128).max,
-            amount1Max: type(uint128).max
-        });
-        (amountToken0, amountToken1) = i_positionManager.collect(collectParams);
-    }
-
-    /**
-     * @notice Swaps tokens only if amount exceeds dust threshold, otherwise refunds original token
-     * @dev Prevents failed swaps on tiny amounts by checking against dust threshold
-     * @param tokenIn Source token address
-     * @param tokenOut Target token address  
-     * @param amountIn Amount to swap or refund
-     * @param pool Pool address for the swap
-     * @return amountOut Amount of tokenOut received (0 if dust refunded)
-     */
-    function _swapWithDustCheck(address tokenIn, address tokenOut, uint256 amountIn, address pool) private  returns (uint256 amountOut) {
-        if (amountIn > (amountIn * PERCENTAGE_DENOMINATOR / BPS_DENOMINATOR)) {
-            amountOut = _swap(tokenIn, tokenOut, amountIn, pool);
-        } else {
-            // Return dust as-is in original token
-            IERC20(tokenIn).safeTransfer(msg.sender, amountIn);
-            amountOut = 0;
-        }
-    }
-
-    /**
-     * @notice Executes token swap via Uniswap V3 with slippage protection
-     * @dev Uses exact input swap with calculated minimum output and price limits
-     * @param tokenIn Source token address
-     * @param tokenOut Target token address
-     * @param amountIn Exact amount to swap
-     * @param pool Pool address for fee tier lookup
-     * @return amountSwapped Actual amount of tokenOut received
-     */
-    function _swap(address tokenIn, address tokenOut, uint256 amountIn, address pool)
-        private
-        returns (uint256 amountSwapped)
-    {
-        _ensureAllowance(IERC20(tokenIn), address(i_swapRouter), amountIn);
-        uint24 fee = IUniswapV3Pool(pool).fee();
-        uint256 expectedOut = _getExpectedOutput(tokenIn, tokenOut, fee, amountIn);
-        uint256 amountOutMinimum = _getAmountOutMinimum(expectedOut);
-        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            fee: fee,
-            recipient: address(this),
-            deadline: block.timestamp + i_swap_deadline_blocks,
-            amountIn: amountIn,
-            amountOutMinimum: amountOutMinimum,
-            sqrtPriceLimitX96: 0
-        });
-
-        amountSwapped = i_swapRouter.exactInputSingle(params);
-    }
-
-    /**
-     * @notice Internal function to create position after token rebalancing
-     * @dev Handles optimal swapping for single-token deposits and mints the position NFT
-     * @param params Rebalance parameters containing amounts, tokens, pool, and tick range
-     * @return positionId The newly minted position ID
-     * @return liquidity Amount of liquidity minted
-     * @return amount0 Token0 amount used in position creation
-     * @return amount1 Token1 amount used in position creation
-     * @custom:optimization Calculates optimal swap ratios for single-token deposits
-     */
-    function _openPosition(
-        RebalanceParams memory params
-    ) private returns (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) {
-        if (params.amount0 == 0 || params.amount1 == 0) {
-            // Calculate what ratio we need for this range
-            uint256 optimalSwapAmount = _findOptimalSwapAmount(
-                params.pool,
-                params.amount0 > 0 ? params.poolTokens.token0 : params.poolTokens.token1,
-                params.amount0 > 0 ? params.amount0 : params.amount1,
-                params.tickLower,
-                params.tickUpper
-            );
-            if (params.amount0 == 0) {
-                uint256 swapped = _swap(params.poolTokens.token1, params.poolTokens.token0, optimalSwapAmount, params.pool);
-                params.amount0 = swapped;
-                params.amount1 = params.amount1 - optimalSwapAmount;
-            } else {
-                uint256 swapped = _swap(params.poolTokens.token0, params.poolTokens.token1, optimalSwapAmount, params.pool);
-                params.amount1 = swapped;
-                params.amount0 = params.amount0 - optimalSwapAmount;
-            }
-        }
-        
-        // Compute desired mint amounts
-        (uint256 amount0Desired, uint256 amount1Desired) = _getRangeAmounts(params.pool, params.amount0, params.amount1, params.tickLower, params.tickUpper);
-        
-        // Approve PositionManager to pull both tokens
-        _ensureAllowance(IERC20(params.poolTokens.token0), address(i_positionManager), amount0Desired);
-        _ensureAllowance(IERC20(params.poolTokens.token1), address(i_positionManager), amount1Desired);
-
-        // Mint the position NFT directly to the user
-        INonfungiblePositionManager.MintParams memory mintParams = INonfungiblePositionManager.MintParams({
-            token0: params.poolTokens.token0,
-            token1: params.poolTokens.token1,
-            fee: params.poolTokens.fee,
-            tickLower: params.tickLower,
-            tickUpper: params.tickUpper,
-            amount0Desired: amount0Desired,
-            amount1Desired: amount1Desired,
-            amount0Min: 0,
-            amount1Min: 0,
-            recipient: msg.sender,
-            deadline: block.timestamp + i_swap_deadline_blocks
-        });
-
-        (positionId, liquidity, amount0, amount1) = i_positionManager.mint(mintParams);
-        _refundDust(params.poolTokens.token0, params.poolTokens.token1, amount0, amount1, params.amount0, params.amount1);
-    }
-
-    /**
-     * @notice Calculates optimal swap amount to achieve proper token ratio for a price range
-     * @dev Uses linear interpolation based on current tick position within the range
-     * @param pool Pool address for current tick lookup
-     * @param tokenIn The input token being swapped
-     * @param amountIn Total amount available to swap
-     * @param tickLower Lower boundary of target range
-     * @param tickUpper Upper boundary of target range
-     * @return Optimal amount of tokenIn to swap for balanced liquidity addition
-     * @custom:algorithm Linear interpolation: more token0 needed near upper tick, more token1 near lower tick
-     */
-    function _findOptimalSwapAmount(
-        address pool,
-        address tokenIn,
-        uint256 amountIn,
-        int24 tickLower,
-        int24 tickUpper
-    ) private view returns (uint256) {
-        // Start with a simple heuristic based on tick positions
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
-        
-        // Calculate position in range (0 to 1)
-        uint256 rangeSize = uint256(int256(tickUpper - tickLower));
-        uint256 positionInRange = uint256(int256(currentTick - tickLower));
-        
-        // If we're at the lower tick, we need 100% token1
-        // If we're at the upper tick, we need 100% token0
-        // Linear interpolation between
-        bool isToken0 = tokenIn == IUniswapV3Pool(pool).token0();
-        
-        uint256 swapPercentage;
-        if (isToken0) {
-            // We have token0, need to swap some to token1
-            swapPercentage = (positionInRange * PRECISION_MULTIPLIER) / rangeSize;
-        } else {
-            // We have token1, need to swap some to token0
-            swapPercentage = ((rangeSize - positionInRange) * PRECISION_MULTIPLIER) / rangeSize;
-        }
-        
-        return (amountIn * swapPercentage) / PRECISION_MULTIPLIER;
-    }
-
-    /**
-     * @notice Ensures sufficient token allowance for spender, setting to max if needed
-     * @dev Checks current allowance and approves max uint256 if insufficient
-     * @param token The ERC20 token to approve
-     * @param spender Address that needs token approval
-     * @param amount Minimum required allowance amount
-     */
-    function _ensureAllowance(IERC20 token, address spender, uint256 amount) private {
-        uint256 current = token.allowance(address(this), spender);
-        if (current < amount) {
-            token.forceApprove(spender, type(uint256).max);
-        }
-    }
-
-    /**
-     * @notice Calculates expected swap output using current pool price and fees
-     * @dev Applies trading fees, uses sqrtPrice for conversion, adds 2% safety buffer
-     * @param tokenIn Source token address
-     * @param tokenOut Target token address
-     * @param fee Pool fee tier in hundredths of basis points
-     * @param amountIn Amount to swap
-     * @return expectedOut Expected output amount with safety buffer applied
-     * @custom:reverts LPManager__InvalidPool if pool doesn't exist
-     * @custom:reverts LPManager__InvalidPrice if calculated output is zero
-     */
-    function _getExpectedOutput(
-        address tokenIn,
-        address tokenOut,
-        uint24 fee,
-        uint256 amountIn
-    ) private view returns (uint256 expectedOut) {
-        address pool = IUniswapV3Factory(i_factory).getPool(tokenIn, tokenOut, fee);
-        if (pool == address(0)) {
-            revert LPManager__InvalidPool();
-        }
-        
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        
-        // Apply fee: amountIn after fee = amountIn * (1e6 - fee) / 1e6
-        uint256 amountInAfterFee = (amountIn * (FEE_DENOMINATOR - fee)) / FEE_DENOMINATOR;
-        
-        // Determine token order
-        bool isToken0 = tokenIn < tokenOut;
-        
-        if (isToken0) {
-            // Converting token0 to token1
-            expectedOut = FullMath.mulDiv(
-                amountInAfterFee,
-                uint256(sqrtPriceX96) * uint256(sqrtPriceX96),
-                SQRT_PRICE_DENOMINATOR
-            );
-        } else {
-            // Converting token1 to token0
-            expectedOut = FullMath.mulDiv(
-                amountInAfterFee,
-                SQRT_PRICE_DENOMINATOR,
-                uint256(sqrtPriceX96) * uint256(sqrtPriceX96)
-            );
-        }
-
-        expectedOut = (expectedOut * SLIPPAGE_BUFFER_PERCENTAGE) / PERCENTAGE_DENOMINATOR;
-        
-        if (expectedOut == 0) {
-            revert LPManager__InvalidPrice();
-        }
-        
-        return expectedOut;
-    }
-
-    /**
-     * @notice Deducts protocol fee from deposit amounts
-     * @dev Calculates and transfers deposit protocol fee, returns net amount
-     * @param token Token address to collect fee from
-     * @param amount Gross deposit amount
-     * @return Net amount after protocol fee deduction
-     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
-     */
-    function _collectDepositProtocolFee(address token, uint256 amount) private returns (uint256) {
-        uint256 depositProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateDepositProtocolFee(amount);
-        if (depositProtocolFee >= amount) {
-            revert LPManager__AmountLessThanProtocolFee();
-        }
-        IERC20(token).safeTransfer(i_protocolFeeCollector, depositProtocolFee);
-        return amount - depositProtocolFee;
-    }
-
-    /**
-     * @notice Deducts protocol fee from claimed fees
-     * @dev Calculates and transfers fees protocol fee, returns net amount
-     * @param token Token address to collect fee from
-     * @param amount Gross fee amount
-     * @return Net amount after protocol fee deduction
-     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
-     */
-    function _collectFeesProtocolFee(address token, uint256 amount) private returns (uint256) {
-        uint256 feesProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateFeesProtocolFee(amount);
-        if (feesProtocolFee >= amount) {
-            revert LPManager__AmountLessThanProtocolFee();
-        }
-        IERC20(token).safeTransfer(i_protocolFeeCollector, feesProtocolFee);
-        return amount - feesProtocolFee;
-    }
-
-    /**
-     * @notice Deducts protocol fee from withdrawn liquidity
-     * @dev Calculates and transfers liquidity protocol fee, returns net amount
-     * @param token Token address to collect fee from
-     * @param amount Gross withdrawal amount
-     * @return Net amount after protocol fee deduction
-     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
-     */
-    function _collectLiquidityProtocolFee(address token, uint256 amount) private returns (uint256) {
-        uint256 liquidityProtocolFee = ProtocolFeeCollector(payable(i_protocolFeeCollector)).calculateLiquidityProtocolFee(amount);
-        if (liquidityProtocolFee >= amount) {
-            revert LPManager__AmountLessThanProtocolFee();
-        }
-        IERC20(token).safeTransfer(i_protocolFeeCollector, liquidityProtocolFee);
-        return amount - liquidityProtocolFee;
-    }
-
-    ////////////////////////////
-    // Private View Functions
-    ////////////////////////////
-
-    /**
-     * @notice Calculates optimal token amounts for a given price range
-     * @dev Uses Uniswap's LiquidityAmounts library to determine proper token ratio
-     * @param pool Pool address for current price lookup
-     * @param amount0 Available token0 amount
-     * @param amount1 Available token1 amount
-     * @param tickLower Lower tick of target range
-     * @param tickUpper Upper tick of target range
-     * @return amount0Desired Optimal amount of token0 for the range
-     * @return amount1Desired Optimal amount of token1 for the range
-     */
-    function _getRangeAmounts(address pool, uint256 amount0, uint256 amount1, int24 tickLower, int24 tickUpper) private view returns (uint256 amount0Desired, uint256 amount1Desired) {
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        uint160 sqrtA = TickMath.getSqrtRatioAtTick(tickLower);
-        uint160 sqrtB = TickMath.getSqrtRatioAtTick(tickUpper);
-        uint128 optLiq = LiquidityAmounts.getLiquidityForAmounts(sqrtPriceX96, sqrtA, sqrtB, amount0, amount1);
-        (amount0Desired, amount1Desired) = LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, sqrtA, sqrtB, optLiq);
-    }
-
-    /**
-     * @notice Retrieves and caches position parameters for liquidity operations
-     * @dev Fetches position data from NFT and constructs pool address
-     * @param positionId Position ID to get parameters for
-     * @return params Struct containing position's pool, tokens, fee, and tick range
-     */
-    function _getIncreaseLiquidityParams(uint256 positionId) private view returns (IncreaseLiquidityParams memory params) {
-        (,, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper,,,,,) = i_positionManager.positions(positionId);
-        address pool = IUniswapV3Factory(i_factory).getPool(token0, token1, fee);
-        params = IncreaseLiquidityParams({
-            pool: pool,
-            token0: token0,
-            token1: token1,
-            fee: fee,
-            tickLower: tickLower,
-            tickUpper: tickUpper
-        });
-    }
-
-    /**
-     * @notice Gets human-readable price from pool's current tick
-     * @dev Converts sqrtPriceX96 to decimal-adjusted price (token1 per token0)
+     * @notice Returns current sqrt price Q96 for the given pool
      * @param pool Pool address
-     * @param token0 First token address
-     * @param token1 Second token address
-     * @return price Current price adjusted for token decimals
+     * @return sqrtPriceX96 Current sqrt price in Q96 format
      */
-    function _getPriceFromPool(address pool, address token0, address token1) private view returns (uint256 price) {
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
-        uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(currentTick);
-        
-        uint8 decimals0 = IERC20Metadata(token0).decimals();
-        uint8 decimals1 = IERC20Metadata(token1).decimals();
-
-        uint256 numerator = uint256(sqrtPriceX96) * uint256(sqrtPriceX96) * (10 ** decimals0);
-        uint256 denominator = SQRT_PRICE_DENOMINATOR * (10 ** decimals1);
-    
-        price = numerator / denominator;
+    function getCurrentSqrtPriceX96(address pool) public view returns (uint256 sqrtPriceX96) {
+        (sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        return uint256(sqrtPriceX96);
     }
 
     /**
-     * @notice Calculates unclaimed fees for a position using Uniswap V3 fee growth accounting
-     * @dev Implements Uniswap's fee growth algorithm considering tick position and range boundaries
-     * @param pool Pool address for fee growth data
-     * @param tickLower Lower tick of position range
-     * @param tickUpper Upper tick of position range
-     * @param liquidity Position's liquidity amount
-     * @param feeGrowthInside0LastX128 Last recorded fee growth for token0
-     * @param feeGrowthInside1LastX128 Last recorded fee growth for token1
-     * @return fee0 Unclaimed token0 fees
-     * @return fee1 Unclaimed token1 fees
-     * @custom:algorithm Handles three cases: tick below/inside/above position range
+     * @notice Returns basic pool information (addresses of tokens and fee tier)
+     * @param poolAddress Address of the Uniswap V3 pool
+     * @return PoolInfo Struct with pool address, token0, token1, and fee
      */
-    function _calculateUnclaimedFees(
-        address pool,
+    function getPoolInfo(address poolAddress) public view returns (PoolInfo memory) {
+        return PoolInfo({
+            pool: poolAddress,
+            token0: IUniswapV3Pool(poolAddress).token0(),
+            token1: IUniswapV3Pool(poolAddress).token1(),
+            fee: IUniswapV3Pool(poolAddress).fee()
+        });
+    }
+
+    /* ============ EXTERNAL FUNCTIONS ============ */
+
+    /**
+     * @notice Creates a new Uniswap V3 position with best-effort input rebalancing to maximize liquidity
+     * @dev Pulls tokens from msg.sender, applies protocol deposit fee, rebalances inputs,
+     *      mints the position for the recipient and returns actual amounts used.
+     * @param poolAddress Target pool address
+     * @param amountIn0 Amount of token0 to supply (before protocol fee)
+     * @param amountIn1 Amount of token1 to supply (before protocol fee)
+     * @param tickLower Lower tick bound
+     * @param tickUpper Upper tick bound
+     * @param recipient Receiver of the NFT
+     * @param minLiquidity Minimal acceptable liquidity minted
+     * @return positionId New NFT id
+     * @return liquidity Minted liquidity
+     * @return amount0 Actual amount of token0 used
+     * @return amount1 Actual amount of token1 used
+     */
+    function createPosition(
+        address poolAddress,
+        uint256 amountIn0,
+        uint256 amountIn1,
         int24 tickLower,
         int24 tickUpper,
-        uint128 liquidity,
-        uint256 feeGrowthInside0LastX128,
-        uint256 feeGrowthInside1LastX128
-    ) internal view returns (uint256 fee0, uint256 fee1) {
-        // Get current tick from pool
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        address recipient,
+        uint256 minLiquidity
+    ) public returns (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) {
+        PoolInfo memory poolInfo = getPoolInfo(poolAddress);
 
-        // Get global fee growth
-        uint256 feeGrowthGlobal0X128 = IUniswapV3Pool(pool).feeGrowthGlobal0X128();
-        uint256 feeGrowthGlobal1X128 = IUniswapV3Pool(pool).feeGrowthGlobal1X128();
-        
-        // Get tick info for lower and upper ticks
-        (, , uint256 feeGrowthOutside0X128Lower, uint256 feeGrowthOutside1X128Lower,,,,) = 
-            IUniswapV3Pool(pool).ticks(tickLower);
-        (, , uint256 feeGrowthOutside0X128Upper, uint256 feeGrowthOutside1X128Upper,,,,) = 
-            IUniswapV3Pool(pool).ticks(tickUpper);
-        
-        // Calculate fee growth inside the position's range
-        uint256 feeGrowthInside0X128;
-        uint256 feeGrowthInside1X128;
-        
-        unchecked {
-            if (currentTick < tickLower) {
-                // Current tick is below the position range
-                feeGrowthInside0X128 = feeGrowthOutside0X128Lower - feeGrowthOutside0X128Upper;
-                feeGrowthInside1X128 = feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
-            } else if (currentTick >= tickUpper) {
-                // Current tick is above the position range
-                feeGrowthInside0X128 = feeGrowthOutside0X128Upper - feeGrowthOutside0X128Lower;
-                feeGrowthInside1X128 = feeGrowthOutside1X128Upper - feeGrowthOutside1X128Lower;
-            } else {
-                // Current tick is inside the position range
-                feeGrowthInside0X128 = feeGrowthGlobal0X128 - feeGrowthOutside0X128Lower - feeGrowthOutside0X128Upper;
-                feeGrowthInside1X128 = feeGrowthGlobal1X128 - feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
-            }
-            
-            // Use FullMath for safe multiplication and division
-            fee0 = FullMath.mulDiv(
-                uint256(feeGrowthInside0X128 - feeGrowthInside0LastX128),
-                liquidity,
-                Q128 // 2^128
-            );
-            fee1 = FullMath.mulDiv(
-                uint256(feeGrowthInside1X128 - feeGrowthInside1LastX128),
-                liquidity,
-                Q128 // 2^128
-            );
+        if (amountIn0 > 0) {
+            IERC20Metadata(poolInfo.token0).safeTransferFrom(msg.sender, address(this), amountIn0);
         }
+        if (amountIn1 > 0) {
+            IERC20Metadata(poolInfo.token1).safeTransferFrom(msg.sender, address(this), amountIn1);
+        }
+
+        PositionContext memory ctx = PositionContext({poolInfo: poolInfo, tickLower: tickLower, tickUpper: tickUpper});
+        (positionId, liquidity, amount0, amount1) = _openPosition(ctx, amountIn0, amountIn1, recipient, minLiquidity);
+        emit PositionCreated(
+            positionId, liquidity, amount0, amount1, tickLower, tickUpper, getCurrentSqrtPriceX96(poolInfo.pool)
+        );
+    }
+
+    /**
+     * @notice Claims all accrued fees for a position in both tokens
+     * @param positionId Position id
+     * @param recipient Receiver of the claimed fees
+     * @param minAmountOut0 Minimal acceptable token0 amount to protect against unexpected slippage
+     * @param minAmountOut1 Minimal acceptable token1 amount to protect against unexpected slippage
+     */
+    function claimFees(uint256 positionId, address recipient, uint256 minAmountOut0, uint256 minAmountOut1)
+        external
+        returns (uint256 amount0, uint256 amount1)
+    {
+        (amount0, amount1) = _claimFees(positionId, recipient, TransferInfoInToken.BOTH);
+        require(amount0 >= minAmountOut0, Amount0LessThanMin());
+        require(amount1 >= minAmountOut1, Amount1LessThanMin());
+        emit ClaimedFees(positionId, amount0, amount1);
+    }
+
+    /**
+     * @notice Claims all accrued fees for a position and swaps them into a single token
+     * @param positionId Position id
+     * @param recipient Receiver of the claimed fees
+     * @param tokenOut Desired output token (must be pool token0 or token1)
+     * @param minAmountOut Minimal acceptable output amount
+     */
+    function claimFees(uint256 positionId, address recipient, address tokenOut, uint256 minAmountOut)
+        external
+        returns (uint256 amountOut)
+    {
+        (PoolInfo memory poolInfo) = _getPoolInfoById(positionId);
+        require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
+
+        (uint256 amount0, uint256 amount1) = _claimFees(
+            positionId, recipient, tokenOut == poolInfo.token0 ? TransferInfoInToken.TOKEN0 : TransferInfoInToken.TOKEN1
+        );
+        // do we need to check that amount0 and amount1 are not 0?
+        amountOut = amount0 == 0 ? amount1 : amount0;
+        require(amountOut >= minAmountOut, AmountLessThanMin());
+        emit ClaimedFeesInToken(positionId, tokenOut, amountOut);
+    }
+
+    /**
+     * @notice Adds liquidity to an existing position using input auto-rebalancing
+     * @param positionId Position id
+     * @param amountIn0 Amount of token0 to add (before protocol fee)
+     * @param amountIn1 Amount of token1 to add (before protocol fee)
+     * @param minLiquidity Minimal acceptable liquidity increase
+     */
+    function increaseLiquidity(uint256 positionId, uint256 amountIn0, uint256 amountIn1, uint128 minLiquidity)
+        external
+        returns (uint128 liquidity, uint256 added0, uint256 added1)
+    {
+        PositionContext memory ctx = _getPositionContext(positionId);
+
+        if (amountIn0 > 0) {
+            IERC20Metadata(ctx.poolInfo.token0).safeTransferFrom(msg.sender, address(this), amountIn0);
+            amountIn0 = _collectDepositProtocolFee(ctx.poolInfo.token0, amountIn0);
+        }
+        if (amountIn1 > 0) {
+            IERC20Metadata(ctx.poolInfo.token1).safeTransferFrom(msg.sender, address(this), amountIn1);
+            amountIn1 = _collectDepositProtocolFee(ctx.poolInfo.token1, amountIn1);
+        }
+
+        (liquidity, added0, added1) = _increaseLiquidity(positionId, ctx, amountIn0, amountIn1, minLiquidity);
+
+        emit LiquidityIncreased(positionId, added0, added1);
+    }
+
+    /**
+     * @notice Compounds currently accrued fees back into the same position using auto-rebalancing
+     * @param positionId Position id
+     * @param minLiquidity Minimal acceptable liquidity increase
+     */
+    function compoundFees(uint256 positionId, uint128 minLiquidity)
+        external
+        onlyPositionOwner(positionId)
+        returns (uint128 liquidity, uint256 added0, uint256 added1)
+    {
+        PositionContext memory ctx = _getPositionContext(positionId);
+        (uint256 fees0, uint256 fees1) = _collect(positionId);
+
+        fees0 = _collectFeesProtocolFee(ctx.poolInfo.token0, fees0);
+        fees1 = _collectFeesProtocolFee(ctx.poolInfo.token1, fees1);
+
+        (liquidity, added0, added1) = _increaseLiquidity(positionId, ctx, fees0, fees1, minLiquidity);
+
+        emit CompoundedFees(positionId, added0, added1);
+    }
+
+    /**
+     * @notice Migrates liquidity to a new range by withdrawing and minting a new position within the same pool
+     * @param positionId Position id to migrate from
+     * @param recipient Recipient of the new position
+     * @param newLower New lower tick
+     * @param newUpper New upper tick
+     * @return newPositionId Newly minted NFT id
+     * @return liquidity Minted liquidity in the new position
+     * @return amount0 Amount of token0 supplied in the new position
+     * @return amount1 Amount of token1 supplied in the new position
+     */
+    function moveRange(uint256 positionId, address recipient, int24 newLower, int24 newUpper, uint256 minLiquidity)
+        external
+        onlyPositionOwner(positionId)
+        returns (uint256 newPositionId, uint128 liquidity, uint256 amount0, uint256 amount1)
+    {
+        PositionContext memory ctx = _getPositionContext(positionId);
+        _decreaseLiquidity(positionId, PRECISION);
+        (uint256 amount0Collected, uint256 amount1Collected) = _collect(positionId);
+        ctx.tickLower = newLower;
+        ctx.tickUpper = newUpper;
+        // just compound all fees into new position
+        (newPositionId, liquidity, amount0, amount1) =
+            _openPosition(ctx, amount0Collected, amount1Collected, recipient, minLiquidity);
+        emit RangeMoved(newPositionId, positionId, newLower, newUpper, amount0, amount1);
+    }
+
+    /**
+     * @notice Withdraws a percentage of liquidity and transfers both tokens to a recipient
+     * @param positionId Position id
+     * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
+     * @param recipient Receiver of withdrawn tokens
+     * @param minAmountOut0 Minimal acceptable token0 amount
+     * @param minAmountOut1 Minimal acceptable token1 amount
+     */
+    function withdraw(
+        uint256 positionId,
+        uint32 percent,
+        address recipient,
+        uint256 minAmountOut0,
+        uint256 minAmountOut1
+    ) external returns (uint256 amount0, uint256 amount1) {
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
+        (amount0, amount1) = _withdraw(positionId, percent);
+        amount0 = _collectLiquidityProtocolFee(poolInfo.token0, amount0);
+        amount1 = _collectLiquidityProtocolFee(poolInfo.token1, amount1);
+        require(amount0 >= minAmountOut0, Amount0LessThanMin());
+        require(amount1 >= minAmountOut1, Amount1LessThanMin());
+        if (amount0 > 0) {
+            IERC20Metadata(poolInfo.token0).safeTransfer(recipient, amount0);
+        }
+        if (amount1 > 0) {
+            IERC20Metadata(poolInfo.token1).safeTransfer(recipient, amount1);
+        }
+        emit WithdrawnBothTokens(positionId, poolInfo.token0, poolInfo.token1, amount0, amount1);
+    }
+
+    /**
+     * @notice Withdraws a percentage of liquidity and swaps the proceeds into a single token
+     * @param positionId Position id
+     * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
+     * @param recipient Receiver of withdrawn tokens
+     * @param tokenOut Desired output token (must be pool token0 or token1)
+     * @param minAmountOut Minimal acceptable output
+     */
+    function withdraw(uint256 positionId, uint32 percent, address recipient, address tokenOut, uint256 minAmountOut)
+        external
+        returns (uint256 amountOut)
+    {
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
+        require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
+        (uint256 amount0, uint256 amount1) = _withdraw(positionId, percent);
+        if (tokenOut == poolInfo.token0) {
+            amountOut = _collectLiquidityProtocolFee(poolInfo.token0, amount0 + _swap(false, amount1, poolInfo));
+        } else {
+            amountOut = _collectLiquidityProtocolFee(poolInfo.token1, amount1 + _swap(true, amount0, poolInfo));
+        }
+        require(amountOut >= minAmountOut, AmountLessThanMin());
+        IERC20Metadata(tokenOut).safeTransfer(recipient, amountOut);
+        emit WithdrawnSingleToken(positionId, tokenOut, amountOut, amount0, amount1);
+    }
+
+    /* ============ INTERNAL FUNCTIONS ============ */
+
+    /**
+     * @notice Resolves the Uniswap V3 pool address by token order and fee tier
+     * @param token0 Pool token0 address
+     * @param token1 Pool token1 address
+     * @param fee Fee tier (e.g. 500, 3000, 10000)
+     * @return pool Pool address
+     */
+    function _getPool(address token0, address token1, uint24 fee) private view returns (address) {
+        return factory.getPool(token0, token1, fee);
     }
 
     /**
@@ -1169,7 +489,7 @@ contract LPManager is Ownable, ReentrancyGuard {
      * @param positionId Position ID to query
      * @return rawPositionData Complete position data including tokens, range, liquidity, and fees
      */
-    function _getRawPositionData(uint256 positionId) private view returns (RawPositionData memory rawPositionData) {
+    function _getRawPositionData(uint256 positionId) internal view returns (RawPositionData memory rawPositionData) {
         (
             ,
             ,
@@ -1183,7 +503,7 @@ contract LPManager is Ownable, ReentrancyGuard {
             uint256 feeGrowthInside1LastX128,
             uint128 tokensOwed0,
             uint128 tokensOwed1
-        ) = i_positionManager.positions(positionId);
+        ) = positionManager.positions(positionId);
         rawPositionData = RawPositionData({
             token0: token0,
             token1: token1,
@@ -1191,20 +511,477 @@ contract LPManager is Ownable, ReentrancyGuard {
             tickLower: tickLower,
             tickUpper: tickUpper,
             liquidity: liquidity,
-            unclaimedFee0: feeGrowthInside0LastX128,
-            unclaimedFee1: feeGrowthInside1LastX128,
+            feeGrowthInside0LastX128: feeGrowthInside0LastX128,
+            feeGrowthInside1LastX128: feeGrowthInside1LastX128,
             claimedFee0: tokensOwed0,
             claimedFee1: tokensOwed1
         });
     }
 
     /**
-     * @notice Calculates minimum acceptable swap output based on slippage tolerance
-     * @dev Applies configured slippage percentage to expected amount
-     * @param amount Expected swap output amount
-     * @return Minimum acceptable amount accounting for slippage
+     * @notice Claims fees for a position
+     * @param positionId Position id
+     * @param recipient Recipient of the fees
+     * @param transferInfoInToken Transfer info in token
+     * @return amount0 Amount of token0 claimed
+     * @return amount1 Amount of token1 claimed
      */
-    function _getAmountOutMinimum(uint256 amount) private view returns (uint256) {
-        return (amount * (BPS_DENOMINATOR - s_slippageBps)) / BPS_DENOMINATOR;
+    function _claimFees(uint256 positionId, address recipient, TransferInfoInToken transferInfoInToken)
+        internal
+        onlyPositionOwner(positionId)
+        returns (uint256 amount0, uint256 amount1)
+    {
+        (PoolInfo memory poolInfo) = _getPoolInfoById(positionId);
+        (amount0, amount1) = _collect(positionId);
+        amount0 = _collectFeesProtocolFee(poolInfo.token0, amount0);
+        amount1 = _collectFeesProtocolFee(poolInfo.token1, amount1);
+        if (transferInfoInToken != TransferInfoInToken.BOTH) {
+            if (transferInfoInToken == TransferInfoInToken.TOKEN0) {
+                amount0 += _swap(false, amount1, poolInfo);
+                amount1 = 0;
+            } else {
+                amount1 += _swap(true, amount0, poolInfo);
+                amount0 = 0;
+            }
+        }
+        if (amount0 > 0) IERC20Metadata(poolInfo.token0).safeTransfer(recipient, amount0);
+        if (amount1 > 0) IERC20Metadata(poolInfo.token1).safeTransfer(recipient, amount1);
+    }
+
+    /**
+     * @notice Reads the pool info (addresses and fee) from a position id
+     * @param positionId The Uniswap V3 position token id
+     * @return poolInfo Pool metadata for the underlying pool
+     */
+    function _getPoolInfoById(uint256 positionId) internal view returns (PoolInfo memory poolInfo) {
+        (,, address token0, address token1, uint24 fee,,,,,,,) = positionManager.positions(positionId);
+        address pool = _getPool(token0, token1, fee);
+        poolInfo = PoolInfo({pool: pool, token0: token0, token1: token1, fee: fee});
+    }
+
+    /**
+     * @notice Builds a compact position context used across internal flows
+     * @param positionId The Uniswap V3 position token id
+     * @return ctx Context with pool info and tick bounds
+     */
+    function _getPositionContext(uint256 positionId) internal view returns (PositionContext memory ctx) {
+        (,, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper,,,,,) =
+            positionManager.positions(positionId);
+        PoolInfo memory poolInfo =
+            PoolInfo({pool: _getPool(token0, token1, fee), token0: token0, token1: token1, fee: fee});
+        ctx = PositionContext({poolInfo: poolInfo, tickLower: tickLower, tickUpper: tickUpper});
+    }
+
+    function _getTokenLiquidity(uint256 tokenId) internal view virtual returns (uint128 liquidity) {
+        (,,,,,,, liquidity,,,,) = positionManager.positions(tokenId);
+    }
+
+    function _getTokensOwed(uint256 tokenId) internal view virtual returns (uint128 amount0, uint128 amount1) {
+        (,,,,,,,,,, amount0, amount1) = positionManager.positions(tokenId);
+    }
+
+    /**
+     * @notice Opens a new position
+     * @param ctx Position context
+     * @param amount0 Amount of token0
+     * @param amount1 Amount of token1
+     * @param recipient Recipient of the position
+     * @param minLiquidity Minimal acceptable liquidity minted
+     * @return positionId Position id
+     * @return liquidity Minted liquidity in the new position
+     * @return amount0Used Amount of token0 used in the new position
+     * @return amount1Used Amount of token1 used in the new position
+     */
+    function _openPosition(
+        PositionContext memory ctx,
+        uint256 amount0,
+        uint256 amount1,
+        address recipient,
+        uint256 minLiquidity
+    ) internal returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+        amount0 = _collectLiquidityProtocolFee(ctx.poolInfo.token0, amount0);
+        amount1 = _collectLiquidityProtocolFee(ctx.poolInfo.token1, amount1);
+        // find optimal amounts
+        (amount0, amount1) = _toOptimalRatio(ctx, amount0, amount1);
+        _ensureAllowance(ctx.poolInfo.token0, amount0);
+        _ensureAllowance(ctx.poolInfo.token1, amount1);
+
+        (positionId, liquidity, amount0Used, amount1Used) = _mintPosition(ctx, amount0, amount1, recipient);
+        require(liquidity >= minLiquidity, LiquidityLessThanMin());
+
+        _sendBackRemainingTokens(ctx.poolInfo.token0, ctx.poolInfo.token1, amount0 - amount0Used, amount1 - amount1Used);
+    }
+
+    function _increaseLiquidity(
+        uint256 positionId,
+        PositionContext memory ctx,
+        uint256 amount0,
+        uint256 amount1,
+        uint128 minLiquidity
+    ) internal returns (uint128 liquidity, uint256 added0, uint256 added1) {
+        (amount0, amount1) = _toOptimalRatio(ctx, amount0, amount1);
+        _ensureAllowance(ctx.poolInfo.token0, amount0);
+        _ensureAllowance(ctx.poolInfo.token1, amount1);
+        (liquidity, added0, added1) = positionManager.increaseLiquidity(
+            INonfungiblePositionManager.IncreaseLiquidityParams({
+                tokenId: positionId,
+                amount0Desired: amount0,
+                amount1Desired: amount1,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: type(uint256).max
+            })
+        );
+        require(liquidity >= minLiquidity, LiquidityLessThanMin());
+        _sendBackRemainingTokens(ctx.poolInfo.token0, ctx.poolInfo.token1, amount0 - added0, amount1 - added1);
+    }
+
+    function _mintPosition(PositionContext memory ctx, uint256 amount0, uint256 amount1, address recipient)
+        internal
+        returns (uint256 tokenId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
+    {
+        (tokenId, liquidity, amount0Used, amount1Used) = INonfungiblePositionManager(positionManager).mint(
+            INonfungiblePositionManager.MintParams({
+                token0: ctx.poolInfo.token0,
+                token1: ctx.poolInfo.token1,
+                fee: ctx.poolInfo.fee,
+                tickLower: ctx.tickLower,
+                tickUpper: ctx.tickUpper,
+                amount0Desired: amount0,
+                amount1Desired: amount1,
+                amount0Min: 0,
+                amount1Min: 0,
+                recipient: recipient,
+                deadline: block.timestamp
+            })
+        );
+    }
+
+    function _decreaseLiquidity(uint256 positionId, uint32 percent)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
+        uint128 totalLiquidity = _getTokenLiquidity(positionId);
+        // Decrease liquidity for the current position and return the received token amounts
+        (amount0, amount1) = positionManager.decreaseLiquidity(
+            INonfungiblePositionManager.DecreaseLiquidityParams({
+                tokenId: positionId,
+                liquidity: totalLiquidity * percent / PRECISION,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: type(uint256).max
+            })
+        );
+    }
+
+    function _collect(uint256 positionId) internal returns (uint256 amount0, uint256 amount1) {
+        (amount0, amount1) = _collect(positionId, address(this), type(uint128).max, type(uint128).max);
+    }
+
+    function _collect(uint256 positionId, address recipient, uint128 amount0Max, uint128 amount1Max)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
+        // Collect earned fees from the liquidity position
+        (amount0, amount1) = positionManager.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: positionId,
+                recipient: recipient,
+                amount0Max: amount0Max,
+                amount1Max: amount1Max
+            })
+        );
+    }
+
+    function _withdraw(uint256 positionId, uint32 percent)
+        internal
+        onlyPositionOwner(positionId)
+        returns (uint256 amount0, uint256 amount1)
+    {
+        // decrease liquidity
+        (uint256 liq0, uint256 liq1) = _decreaseLiquidity(positionId, percent);
+        (uint128 owed0, uint128 owed1) = _getTokensOwed(positionId);
+
+        (amount0, amount1) = _collect(
+            positionId,
+            address(this),
+            uint128(liq0 + (uint256(owed0) - liq0) * percent / PRECISION),
+            uint128(liq1 + (uint256(owed1) - liq1) * percent / PRECISION)
+        );
+    }
+
+    /**
+     * @notice Rebalances input amounts towards the optimal proportion for the given price range
+     * @dev Computes desired amounts via _getAmountsInBothTokens. If one side has an excess over
+     *      desired + dust, performs a bounded swap with sqrtPriceLimit to avoid crossing the range.
+     *      If the excess is within dust, skips swapping.
+     * @param ctx Position context (pool info and tick bounds)
+     * @param amount0 Current token0 amount available
+     * @param amount1 Current token1 amount available
+     * @return amount0 Rebalanced token0 amount
+     * @return amount1 Rebalanced token1 amount
+     */
+    function _toOptimalRatio(PositionContext memory ctx, uint256 amount0, uint256 amount1)
+        internal
+        returns (uint256, uint256)
+    {
+        Prices memory prices = _currentLowerUpper(ctx);
+        // Compute desired amounts for target liquidity under current price and bounds
+        uint256 amount1In0 = FullMath.mulDiv(amount1, 2 ** 192, uint256(prices.current) * uint256(prices.current));
+        (uint256 want0, uint256 want1) =
+            _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
+
+        (want0, want1) = (want0, FullMath.mulDiv(want1, uint256(prices.current) * uint256(prices.current), 2 ** 192));
+        if (amount0 > want0) {
+            uint160 limit = _priceLimitForExcess(true, prices);
+
+            (int256 d0, int256 d1) = _swapWithPriceLimit(true, amount0 - want0, ctx.poolInfo, limit);
+            amount0 -= uint256(d0);
+            amount1 += uint256(-d1);
+        } else if (amount1 > want1) {
+            uint160 limit = _priceLimitForExcess(false, prices);
+            (int256 d0, int256 d1) = _swapWithPriceLimit(false, amount1 - want1, ctx.poolInfo, limit);
+            amount0 += uint256(-d0);
+            amount1 -= uint256(d1);
+        }
+        return (amount0, amount1);
+    }
+
+    /**
+     * @notice Gets current price, lower, and upper
+     * @param ctx Position context
+     */
+    function _currentLowerUpper(PositionContext memory ctx) private view returns (Prices memory prices) {
+        prices.current = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
+        prices.lower = TickMath.getSqrtRatioAtTick(ctx.tickLower);
+        prices.upper = TickMath.getSqrtRatioAtTick(ctx.tickUpper);
+    }
+
+    /**
+     * @notice Computes a conservative sqrtPriceLimitX96 for bounded swaps when rebalancing
+     * @dev Prevents price from crossing the position range during the swap. If current price is
+     *      already beyond the corresponding bound, returns that bound; if price is inside the
+     *      range, returns a value slightly inside the bound; otherwise returns 0 to use default.
+     * @param zeroForOne true if selling token0 for token1, false otherwise
+     * @return limit Sqrt price limit to be used in swap
+     */
+    function _priceLimitForExcess(bool zeroForOne, Prices memory prices) private pure returns (uint160 limit) {
+        if (zeroForOne) {
+            // Selling token0 makes price go down: guard at upper if outside, else lower if inside
+            if (prices.current >= prices.upper) return prices.upper;
+            if (prices.current > prices.lower) return prices.lower;
+            return 0;
+        } else {
+            // Selling token1 makes price go up: guard at lower if outside, else upper if inside
+            if (prices.current <= prices.lower) return prices.lower;
+            if (prices.current < prices.upper) return prices.upper;
+            return 0;
+        }
+    }
+
+    function _getAmountsInBothTokens(
+        uint256 amount,
+        uint160 sqrtPriceX96,
+        uint160 sqrtPriceLower,
+        uint160 sqrtPriceUpper
+    ) internal pure returns (uint256 amountFor0, uint256 amountFor1) {
+        if (sqrtPriceX96 <= sqrtPriceLower) {
+            amountFor0 = amount;
+        } else if (sqrtPriceX96 < sqrtPriceUpper) {
+            uint256 n = FullMath.mulDiv(sqrtPriceUpper, sqrtPriceX96 - sqrtPriceLower, FixedPoint96.Q96);
+            uint256 d = FullMath.mulDiv(sqrtPriceX96, sqrtPriceUpper - sqrtPriceX96, FixedPoint96.Q96);
+            uint256 x = FullMath.mulDiv(n, FixedPoint96.Q96, d);
+            amountFor0 = FullMath.mulDiv(amount, FixedPoint96.Q96, x + FixedPoint96.Q96);
+            amountFor1 = amount - amountFor0;
+        } else {
+            amountFor1 = amount;
+        }
+    }
+
+    /**
+     * @notice Deducts protocol fee from claimed fees
+     * @dev Calculates and transfers fees protocol fee, returns net amount
+     * @param token Token address to collect fee from
+     * @param amount Gross fee amount
+     * @return Net amount after protocol fee deduction
+     */
+    function _collectFeesProtocolFee(address token, uint256 amount) private returns (uint256) {
+        if (amount == 0) return 0;
+        uint256 feesProtocolFee = protocolFeeCollector.calculateFeesProtocolFee(amount);
+        IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), feesProtocolFee);
+        return amount - feesProtocolFee;
+    }
+
+    /**
+     * @notice Deducts protocol fee from withdrawn liquidity
+     * @dev Calculates and transfers liquidity protocol fee, returns net amount
+     * @param token Token address to collect fee from
+     * @param amount Gross withdrawal amount
+     * @return Net amount after protocol fee deduction
+     */
+    function _collectLiquidityProtocolFee(address token, uint256 amount) private returns (uint256) {
+        if (amount == 0) return 0;
+        uint256 liquidityProtocolFee = protocolFeeCollector.calculateLiquidityProtocolFee(amount);
+        IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), liquidityProtocolFee);
+        return amount - liquidityProtocolFee;
+    }
+
+    /**
+     * @notice Deducts protocol fee from deposit amounts
+     * @dev Calculates and transfers deposit protocol fee, returns net amount
+     * @param token Token address to collect fee from
+     * @param amount Gross deposit amount
+     * @return Net amount after protocol fee deduction
+     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
+     */
+    function _collectDepositProtocolFee(address token, uint256 amount) private returns (uint256) {
+        if (amount == 0) return 0;
+        uint256 depositProtocolFee = protocolFeeCollector.calculateDepositProtocolFee(amount);
+        IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), depositProtocolFee);
+        return amount - depositProtocolFee;
+    }
+
+    function _calculateUnclaimedFees(
+        address pool,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 liquidity,
+        uint256 feeGrowthInside0LastX128,
+        uint256 feeGrowthInside1LastX128
+    ) internal view returns (uint256 fee0, uint256 fee1) {
+        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        uint256 feeGrowthGlobal0X128 = IUniswapV3Pool(pool).feeGrowthGlobal0X128();
+        uint256 feeGrowthGlobal1X128 = IUniswapV3Pool(pool).feeGrowthGlobal1X128();
+        (,, uint256 feeGrowthOutside0X128Lower, uint256 feeGrowthOutside1X128Lower,,,,) =
+            IUniswapV3Pool(pool).ticks(tickLower);
+        (,, uint256 feeGrowthOutside0X128Upper, uint256 feeGrowthOutside1X128Upper,,,,) =
+            IUniswapV3Pool(pool).ticks(tickUpper);
+
+        uint256 feeGrowthInside0X128;
+        uint256 feeGrowthInside1X128;
+
+        unchecked {
+            if (currentTick < tickLower) {
+                feeGrowthInside0X128 = feeGrowthOutside0X128Lower - feeGrowthOutside0X128Upper;
+                feeGrowthInside1X128 = feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
+            } else if (currentTick >= tickUpper) {
+                feeGrowthInside0X128 = feeGrowthOutside0X128Upper - feeGrowthOutside0X128Lower;
+                feeGrowthInside1X128 = feeGrowthOutside1X128Upper - feeGrowthOutside1X128Lower;
+            } else {
+                feeGrowthInside0X128 = feeGrowthGlobal0X128 - feeGrowthOutside0X128Lower - feeGrowthOutside0X128Upper;
+                feeGrowthInside1X128 = feeGrowthGlobal1X128 - feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
+            }
+
+            fee0 =
+                FullMath.mulDiv(uint256(feeGrowthInside0X128 - feeGrowthInside0LastX128), liquidity, FixedPoint128.Q128);
+            fee1 =
+                FullMath.mulDiv(uint256(feeGrowthInside1X128 - feeGrowthInside1LastX128), liquidity, FixedPoint128.Q128);
+        }
+    }
+
+    /**
+     * @notice Gets human-readable price from pool's current tick
+     * @dev Converts sqrtPriceX96 to decimal-adjusted price (token1 per token0)
+     * @param pool Pool address
+     * @param token0 First token address
+     * @param token1 Second token address
+     * @return price Current price adjusted for token decimals
+     */
+    function _getPriceFromPool(address pool, address token0, address token1) internal view returns (uint256 price) {
+        uint256 sqrtPriceX96 = getCurrentSqrtPriceX96(pool);
+
+        uint256 ratio = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), 1 << 192);
+        price = FullMath.mulDiv(ratio, 10 ** IERC20Metadata(token0).decimals(), 10 ** IERC20Metadata(token1).decimals());
+    }
+
+    function _ensureAllowance(address token, uint256 amount) internal {
+        if (IERC20Metadata(token).allowance(address(this), address(positionManager)) < amount) {
+            IERC20Metadata(token).forceApprove(address(positionManager), type(uint256).max);
+        }
+    }
+
+    /**
+     * @notice Sends back the remaining tokens to the sender
+     * @param token0 Token0 address
+     * @param token1 Token1 address
+     * @param amount0 Amount of token0 to send back
+     * @param amount1 Amount of token1 to send back
+     */
+    function _sendBackRemainingTokens(address token0, address token1, uint256 amount0, uint256 amount1) internal {
+        if (amount0 > 0) {
+            IERC20Metadata(token0).safeTransfer(msg.sender, amount0);
+        }
+        if (amount1 > 0) {
+            IERC20Metadata(token1).safeTransfer(msg.sender, amount1);
+        }
+    }
+
+    /**
+     * @notice Executes an unbounded swap in the pool and returns the output amount
+     * @dev Uses extreme sqrtPriceLimit to allow full price traversal. For rebalancing
+     *      within a range prefer _swapWithPriceLimit to avoid crossing range bounds.
+     * @param zeroForOne true for token0->token1 swap, false for token1->token0
+     * @param amount Exact input amount
+     * @param poolInfo Pool metadata (addresses and fee)
+     * @return out Exact output amount received
+     */
+    function _swap(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo) internal returns (uint256 out) {
+        (int256 amount0, int256 amount1) = _swapWithPriceLimit(zeroForOne, amount, poolInfo, 0);
+        // Output amount is the negative leg (exact input convention)
+        out = uint256(-(zeroForOne ? amount1 : amount0));
+    }
+
+    /**
+     * @notice Executes a swap with a conservative sqrt price limit for rebalancing
+     * @dev If limit is zero, uses an extreme limit to avoid accidental reverts, but
+     *      in rebalancing flows limit should be chosen via _priceLimitForExcess.
+     * @param zeroForOne true for token0->token1 swap, false for token1->token0
+     * @param amount The amount of the swap, which implicitly configures the swap as exact input (positive), or exact output (negative)
+     * @param poolInfo Pool metadata (addresses and fee)
+     * @param sqrtPriceLimitX96 Sqrt price limit (Q96). Zero uses extreme default
+     * @return amount0 Signed token0 delta (positive = we pay token0)
+     * @return amount1 Signed token1 delta (positive = we pay token1)
+     */
+    function _swapWithPriceLimit(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo, uint160 sqrtPriceLimitX96)
+        internal
+        returns (int256 amount0, int256 amount1)
+    {
+        if (amount == 0) return (0, 0);
+        if (sqrtPriceLimitX96 == 0) {
+            sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1;
+        }
+        (amount0, amount1) = IUniswapV3Pool(poolInfo.pool).swap(
+            address(this),
+            zeroForOne,
+            int256(amount),
+            sqrtPriceLimitX96,
+            zeroForOne
+                ? abi.encode(poolInfo.token0, poolInfo.token1, poolInfo.fee)
+                : abi.encode(poolInfo.token1, poolInfo.token0, poolInfo.fee)
+        );
+    }
+
+    /* ============ CALLBACK FUNCTIONS ============ */
+
+    /**
+     * @notice Uniswap V3 swap callback for providing required token amounts during swaps
+     * @param amount0Delta Amount of the first token delta
+     * @param amount1Delta Amount of the second token delta
+     * @param data Encoded data containing swap details
+     */
+    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external override {
+        // Ensure the callback is being called by the correct pool
+        require(amount0Delta > 0 || amount1Delta > 0, InvalidSwapCallbackDeltas());
+        (address tokenIn, address tokenOut, uint24 fee) = abi.decode(data, (address, address, uint24));
+        require(factory.getPool(tokenIn, tokenOut, fee) == msg.sender, InvalidSwapCallbackCaller());
+        (bool isExactInput, uint256 amountToPay) =
+            amount0Delta > 0 ? (tokenIn < tokenOut, uint256(amount0Delta)) : (tokenOut < tokenIn, uint256(amount1Delta));
+
+        // Transfer the required amount back to the pool
+        if (isExactInput) {
+            IERC20Metadata(tokenIn).safeTransfer(msg.sender, amountToPay);
+        } else {
+            IERC20Metadata(tokenOut).safeTransfer(msg.sender, amountToPay);
+        }
     }
 }

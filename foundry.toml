@@ -3,10 +3,9 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
-solc_version = "0.8.30"
+auto_detect_solc = true
 optimizer = true
 runs = 1000
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
 
 remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
@@ -19,3 +18,19 @@ arbitrum = { key = "${ARBITRUM_SCAN_API_KEY}" }
 
 [profile.solx]
 solc_version = "/Users/mtony/Cybro/solx-macosx-v0.1.1"
+
+[rpc_endpoints]
+blast = "${BLAST_RPC}"
+optimism = "${OPTIMISM_RPC}"
+arbitrum = "${ARBITRUM_RPC}"
+base = "${BASE_RPC}"
+ethereum = "${ETHEREUM_RPC}"
+avalanche = "${AVALANCHE_RPC}"
+metis = "${METIS_RPC}"
+sonic = "${SONIC_RPC}"
+bsc = "${BSC_RPC}"
+scroll = "${SCROLL_RPC}"
+mode = "${MODE_RPC}"
+b2 = "${B2_RPC}"
+unichain = "${UNICHAIN_RPC}"
+core = "${CORE_RPC}"
