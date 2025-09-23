@@ -2,7 +2,6 @@
 pragma solidity 0.8.30;
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
@@ -12,6 +11,8 @@ import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v3-core/contracts/libraries/FixedPoint96.sol";
+import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.sol";
 
 /**
  * @title LPManager
@@ -22,7 +23,7 @@ import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
  *      The contract assumes NFT ownership stays with the user. For actions that require
  *      token/NFT movements, the user must approve allowances to this contract.
  */
-contract LPManager is Ownable, IUniswapV3SwapCallback {
+contract LPManager is IUniswapV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
 
     enum TransferInfoInToken {
@@ -177,9 +178,6 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
 
     /// @notice Precision for calculations (basis points, 1e4 = 100%)
     uint32 public constant PRECISION = 1e4;
-    /// @notice Shift factor for liquidity calculations inside the range, in bps (e.g., 5000 = 50%)
-    /// @dev Used in _getAmountsInBothTokens to partially rebalance the liquidity gap between sides
-    uint32 public constant LIQUIDITY_SHIFT = 5e3;
 
     /* ============ IMMUTABLE VARIABLES ============ */
 
@@ -189,11 +187,7 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
 
     /* ============ CONSTRUCTOR ============ */
 
-    constructor(
-        INonfungiblePositionManager _positionManager,
-        IProtocolFeeCollector _protocolFeeCollector,
-        address _owner
-    ) Ownable(_owner) {
+    constructor(INonfungiblePositionManager _positionManager, IProtocolFeeCollector _protocolFeeCollector) {
         positionManager = _positionManager;
         protocolFeeCollector = _protocolFeeCollector;
         factory = IUniswapV3Factory(_positionManager.factory());
@@ -300,8 +294,7 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
         }
 
         PositionContext memory ctx = PositionContext({poolInfo: poolInfo, tickLower: tickLower, tickUpper: tickUpper});
-        (positionId, liquidity, amount0, amount1) = _openPosition(ctx, amountIn0, amountIn1, recipient);
-        require(liquidity >= minLiquidity, LiquidityLessThanMin());
+        (positionId, liquidity, amount0, amount1) = _openPosition(ctx, amountIn0, amountIn1, recipient, minLiquidity);
         emit PositionCreated(
             positionId, liquidity, amount0, amount1, tickLower, tickUpper, getCurrentSqrtPriceX96(poolInfo.pool)
         );
@@ -406,7 +399,7 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
      * @return amount0 Amount of token0 supplied in the new position
      * @return amount1 Amount of token1 supplied in the new position
      */
-    function moveRange(uint256 positionId, address recipient, int24 newLower, int24 newUpper)
+    function moveRange(uint256 positionId, address recipient, int24 newLower, int24 newUpper, uint256 minLiquidity)
         external
         onlyPositionOwner(positionId)
         returns (uint256 newPositionId, uint128 liquidity, uint256 amount0, uint256 amount1)
@@ -417,7 +410,8 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
         ctx.tickLower = newLower;
         ctx.tickUpper = newUpper;
         // just compound all fees into new position
-        (newPositionId, liquidity, amount0, amount1) = _openPosition(ctx, amount0Collected, amount1Collected, recipient);
+        (newPositionId, liquidity, amount0, amount1) =
+            _openPosition(ctx, amount0Collected, amount1Collected, recipient, minLiquidity);
         emit RangeMoved(newPositionId, positionId, newLower, newUpper, amount0, amount1);
     }
 
@@ -591,23 +585,28 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
      * @param amount0 Amount of token0
      * @param amount1 Amount of token1
      * @param recipient Recipient of the position
+     * @param minLiquidity Minimal acceptable liquidity minted
      * @return positionId Position id
      * @return liquidity Minted liquidity in the new position
      * @return amount0Used Amount of token0 used in the new position
      * @return amount1Used Amount of token1 used in the new position
      */
-    function _openPosition(PositionContext memory ctx, uint256 amount0, uint256 amount1, address recipient)
-        internal
-        returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
-    {
+    function _openPosition(
+        PositionContext memory ctx,
+        uint256 amount0,
+        uint256 amount1,
+        address recipient,
+        uint256 minLiquidity
+    ) internal returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
         amount0 = _collectLiquidityProtocolFee(ctx.poolInfo.token0, amount0);
         amount1 = _collectLiquidityProtocolFee(ctx.poolInfo.token1, amount1);
         // find optimal amounts
         (amount0, amount1) = _toOptimalRatio(ctx, amount0, amount1);
-        _checkAllowance(ctx.poolInfo.token0, amount0);
-        _checkAllowance(ctx.poolInfo.token1, amount1);
+        _ensureAllowance(ctx.poolInfo.token0, amount0);
+        _ensureAllowance(ctx.poolInfo.token1, amount1);
 
         (positionId, liquidity, amount0Used, amount1Used) = _mintPosition(ctx, amount0, amount1, recipient);
+        require(liquidity >= minLiquidity, LiquidityLessThanMin());
 
         _sendBackRemainingTokens(ctx.poolInfo.token0, ctx.poolInfo.token1, amount0 - amount0Used, amount1 - amount1Used);
     }
@@ -620,8 +619,8 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
         uint128 minLiquidity
     ) internal returns (uint128 liquidity, uint256 added0, uint256 added1) {
         (amount0, amount1) = _toOptimalRatio(ctx, amount0, amount1);
-        _checkAllowance(ctx.poolInfo.token0, amount0);
-        _checkAllowance(ctx.poolInfo.token1, amount1);
+        _ensureAllowance(ctx.poolInfo.token0, amount0);
+        _ensureAllowance(ctx.poolInfo.token1, amount1);
         (liquidity, added0, added1) = positionManager.increaseLiquidity(
             INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: positionId,
@@ -725,19 +724,22 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
         internal
         returns (uint256, uint256)
     {
-        (uint160 sqrtP, uint160 sqrtL, uint160 sqrtU) = _currentLowerUpper(ctx);
+        Prices memory prices = _currentLowerUpper(ctx);
         // Compute desired amounts for target liquidity under current price and bounds
-        (uint256 want0, uint256 want1) = _getAmountsInBothTokens(amount0, amount1, sqrtP, sqrtL, sqrtU);
+        uint256 amount1In0 = FullMath.mulDiv(amount1, 2 ** 192, uint256(prices.current) * uint256(prices.current));
+        (uint256 want0, uint256 want1) =
+            _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
         // If token0 is in excess beyond dust threshold, sell the excess with a price guard
-        if (amount0 > want0 + _dust(amount0)) {
-            uint160 limit = _priceLimitForExcess(true, sqrtP, sqrtL, sqrtU);
-            (int256 d0, int256 d1) = _swapWithPriceLimit(true, amount0 - want0, ctx.poolInfo, limit);
+        if (amount1In0 < want1) {
+            uint160 limit = _priceLimitForExcess(true, prices);
+
+            (int256 d0, int256 d1) = _swapWithPriceLimit(true, int256(want1 - amount1In0), ctx.poolInfo, limit);
             amount0 = amount0 - uint256(d0);
             amount1 = amount1 + uint256(-d1);
             // If token1 is in excess beyond dust threshold, sell the excess with a price guard
-        } else if (amount1 > want1 + _dust(amount1)) {
-            uint160 limit = _priceLimitForExcess(false, sqrtP, sqrtL, sqrtU);
-            (int256 d0, int256 d1) = _swapWithPriceLimit(false, amount1 - want1, ctx.poolInfo, limit);
+        } else if (amount0 < want0) {
+            uint160 limit = _priceLimitForExcess(false, prices);
+            (int256 d0, int256 d1) = _swapWithPriceLimit(false, -int256(want0 - amount0), ctx.poolInfo, limit);
             amount0 = amount0 + uint256(-d0);
             amount1 = amount1 - uint256(d1);
         }
@@ -747,18 +749,11 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
     /**
      * @notice Gets current price, lower, and upper
      * @param ctx Position context
-     * @return sqrtP Current price
-     * @return sqrtL Current lower
-     * @return sqrtU Current upper
      */
-    function _currentLowerUpper(PositionContext memory ctx)
-        private
-        view
-        returns (uint160 sqrtP, uint160 sqrtL, uint160 sqrtU)
-    {
-        sqrtP = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
-        sqrtL = TickMath.getSqrtRatioAtTick(ctx.tickLower);
-        sqrtU = TickMath.getSqrtRatioAtTick(ctx.tickUpper);
+    function _currentLowerUpper(PositionContext memory ctx) private view returns (Prices memory prices) {
+        prices.current = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
+        prices.lower = TickMath.getSqrtRatioAtTick(ctx.tickLower);
+        prices.upper = TickMath.getSqrtRatioAtTick(ctx.tickUpper);
     }
 
     /**
@@ -767,71 +762,39 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
      *      already beyond the corresponding bound, returns that bound; if price is inside the
      *      range, returns a value slightly inside the bound; otherwise returns 0 to use default.
      * @param zeroForOne true if selling token0 for token1, false otherwise
-     * @param sqrtP Current sqrt price Q96
-     * @param sqrtL Lower sqrt price bound Q96
-     * @param sqrtU Upper sqrt price bound Q96
      * @return limit Sqrt price limit to be used in swap
      */
-    function _priceLimitForExcess(bool zeroForOne, uint160 sqrtP, uint160 sqrtL, uint160 sqrtU)
-        private
-        pure
-        returns (uint160 limit)
-    {
+    function _priceLimitForExcess(bool zeroForOne, Prices memory prices) private pure returns (uint160 limit) {
         if (zeroForOne) {
-            // Selling token0 makes price go up: guard at upper if outside, else near lower if inside
-            if (sqrtP >= sqrtU) return sqrtU;
-            if (sqrtP > sqrtL) return sqrtL + 10;
+            // Selling token0 makes price go down: guard at upper if outside, else lower if inside
+            if (prices.current >= prices.upper) return prices.upper;
+            if (prices.current > prices.lower) return prices.lower;
             return 0;
         } else {
-            // Selling token1 makes price go down: guard at lower if outside, else near upper if inside
-            if (sqrtP <= sqrtL) return sqrtL;
-            if (sqrtP < sqrtU) return sqrtU - 10;
+            // Selling token1 makes price go up: guard at lower if outside, else upper if inside
+            if (prices.current <= prices.lower) return prices.lower;
+            if (prices.current < prices.upper) return prices.upper;
             return 0;
         }
     }
 
-    /**
-     * @notice Computes desired token amounts compatible with a target liquidity
-     * @dev Outside the range, we target one-sided contribution (L0 + L1). Inside the range,
-     *      we partially shift the liquidity gap between sides by LIQUIDITY_SHIFT (bps),
-     *      which helps maximize L while avoiding over-swap due to price impact.
-     * @param amount0 Available token0 amount
-     * @param amount1 Available token1 amount
-     * @param currentSqrtPriceX96 Current pool sqrt price (Q96)
-     * @param sqrtPriceLower Lower bound sqrt price (Q96)
-     * @param sqrtPriceUpper Upper bound sqrt price (Q96)
-     * @return amount0Desired Desired token0 to match the computed liquidity
-     * @return amount1Desired Desired token1 to match the computed liquidity
-     */
     function _getAmountsInBothTokens(
-        uint256 amount0,
-        uint256 amount1,
-        uint160 currentSqrtPriceX96,
+        uint256 amount,
+        uint160 sqrtPriceX96,
         uint160 sqrtPriceLower,
         uint160 sqrtPriceUpper
-    ) internal pure returns (uint256 amount0Desired, uint256 amount1Desired) {
-        uint128 L0 = LiquidityAmounts.getLiquidityForAmount0(sqrtPriceLower, sqrtPriceUpper, amount0);
-        uint128 L1 = LiquidityAmounts.getLiquidityForAmount1(sqrtPriceLower, sqrtPriceUpper, amount1);
-
-        uint128 realLiquidity;
-        if (currentSqrtPriceX96 <= sqrtPriceLower || currentSqrtPriceX96 >= sqrtPriceUpper) {
-            realLiquidity = L0 + L1;
+    ) internal pure returns (uint256 amountFor0, uint256 amountFor1) {
+        if (sqrtPriceX96 <= sqrtPriceLower) {
+            amountFor0 = amount;
+        } else if (sqrtPriceX96 < sqrtPriceUpper) {
+            uint256 n = FullMath.mulDiv(sqrtPriceUpper, sqrtPriceX96 - sqrtPriceLower, FixedPoint96.Q96);
+            uint256 d = FullMath.mulDiv(sqrtPriceX96, sqrtPriceUpper - sqrtPriceX96, FixedPoint96.Q96);
+            uint256 x = FullMath.mulDiv(n, FixedPoint96.Q96, d);
+            amountFor0 = FullMath.mulDiv(amount, FixedPoint96.Q96, x + FixedPoint96.Q96);
+            amountFor1 = amount - amountFor0;
         } else {
-            if (L0 > L1) {
-                uint128 diff = L0 - L1;
-                uint128 shift = uint128(uint256(diff) * LIQUIDITY_SHIFT / PRECISION);
-                realLiquidity = L0 - shift;
-            } else if (L1 > L0) {
-                uint128 diff = L1 - L0;
-                uint128 shift = uint128(uint256(diff) * LIQUIDITY_SHIFT / PRECISION);
-                realLiquidity = L1 - shift;
-            } else {
-                realLiquidity = L0;
-            }
+            amountFor1 = amount;
         }
-
-        (amount0Desired, amount1Desired) =
-            LiquidityAmounts.getAmountsForLiquidity(currentSqrtPriceX96, sqrtPriceLower, sqrtPriceUpper, realLiquidity);
     }
 
     /**
@@ -908,8 +871,10 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
                 feeGrowthInside1X128 = feeGrowthGlobal1X128 - feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
             }
 
-            fee0 = FullMath.mulDiv(uint256(feeGrowthInside0X128 - feeGrowthInside0LastX128), liquidity, 1 << 128);
-            fee1 = FullMath.mulDiv(uint256(feeGrowthInside1X128 - feeGrowthInside1LastX128), liquidity, 1 << 128);
+            fee0 =
+                FullMath.mulDiv(uint256(feeGrowthInside0X128 - feeGrowthInside0LastX128), liquidity, FixedPoint128.Q128);
+            fee1 =
+                FullMath.mulDiv(uint256(feeGrowthInside1X128 - feeGrowthInside1LastX128), liquidity, FixedPoint128.Q128);
         }
     }
 
@@ -928,7 +893,7 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
         price = FullMath.mulDiv(ratio, 10 ** IERC20Metadata(token0).decimals(), 10 ** IERC20Metadata(token1).decimals());
     }
 
-    function _checkAllowance(address token, uint256 amount) internal {
+    function _ensureAllowance(address token, uint256 amount) internal {
         if (IERC20Metadata(token).allowance(address(this), address(positionManager)) < amount) {
             IERC20Metadata(token).forceApprove(address(positionManager), type(uint256).max);
         }
@@ -980,13 +945,13 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
      * @dev If limit is zero, uses an extreme limit to avoid accidental reverts, but
      *      in rebalancing flows limit should be chosen via _priceLimitForExcess.
      * @param zeroForOne true for token0->token1 swap, false for token1->token0
-     * @param amount Exact input amount
+     * @param amount The amount of the swap, which implicitly configures the swap as exact input (positive), or exact output (negative)
      * @param poolInfo Pool metadata (addresses and fee)
      * @param sqrtPriceLimitX96 Sqrt price limit (Q96). Zero uses extreme default
      * @return amount0 Signed token0 delta (positive = we pay token0)
      * @return amount1 Signed token1 delta (positive = we pay token1)
      */
-    function _swapWithPriceLimit(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo, uint160 sqrtPriceLimitX96)
+    function _swapWithPriceLimit(bool zeroForOne, int256 amount, PoolInfo memory poolInfo, uint160 sqrtPriceLimitX96)
         internal
         returns (int256 amount0, int256 amount1)
     {
@@ -997,16 +962,12 @@ contract LPManager is Ownable, IUniswapV3SwapCallback {
         (amount0, amount1) = IUniswapV3Pool(poolInfo.pool).swap(
             address(this),
             zeroForOne,
-            int256(amount),
+            amount,
             sqrtPriceLimitX96,
             zeroForOne
                 ? abi.encode(poolInfo.token0, poolInfo.token1, poolInfo.fee)
                 : abi.encode(poolInfo.token1, poolInfo.token0, poolInfo.fee)
         );
-    }
-
-    function _dust(uint256 amount) internal pure returns (uint256) {
-        return amount / 1e5;
     }
 
     /* ============ CALLBACK FUNCTIONS ============ */
