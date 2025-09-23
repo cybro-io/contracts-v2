@@ -433,6 +433,7 @@ contract LPManager is IUniswapV3SwapCallback {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         (amount0, amount1) = _withdraw(positionId, percent);
         amount0 = _collectLiquidityProtocolFee(poolInfo.token0, amount0);
+        amount1 = _collectLiquidityProtocolFee(poolInfo.token1, amount1);
         require(amount0 >= minAmountOut0, Amount0LessThanMin());
         require(amount1 >= minAmountOut1, Amount1LessThanMin());
         if (amount0 > 0) {
@@ -729,19 +730,19 @@ contract LPManager is IUniswapV3SwapCallback {
         uint256 amount1In0 = FullMath.mulDiv(amount1, 2 ** 192, uint256(prices.current) * uint256(prices.current));
         (uint256 want0, uint256 want1) =
             _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
-        // If token0 is in excess beyond dust threshold, sell the excess with a price guard
-        if (amount1In0 < want1) {
+
+        (want0, want1) = (want0, FullMath.mulDiv(want1, uint256(prices.current) * uint256(prices.current), 2 ** 192));
+        if (amount0 > want0) {
             uint160 limit = _priceLimitForExcess(true, prices);
 
-            (int256 d0, int256 d1) = _swapWithPriceLimit(true, int256(want1 - amount1In0), ctx.poolInfo, limit);
-            amount0 = amount0 - uint256(d0);
-            amount1 = amount1 + uint256(-d1);
-            // If token1 is in excess beyond dust threshold, sell the excess with a price guard
-        } else if (amount0 < want0) {
+            (int256 d0, int256 d1) = _swapWithPriceLimit(true, amount0 - want0, ctx.poolInfo, limit);
+            amount0 -= uint256(d0);
+            amount1 += uint256(-d1);
+        } else if (amount1 > want1) {
             uint160 limit = _priceLimitForExcess(false, prices);
-            (int256 d0, int256 d1) = _swapWithPriceLimit(false, -int256(want0 - amount0), ctx.poolInfo, limit);
-            amount0 = amount0 + uint256(-d0);
-            amount1 = amount1 - uint256(d1);
+            (int256 d0, int256 d1) = _swapWithPriceLimit(false, amount1 - want1, ctx.poolInfo, limit);
+            amount0 += uint256(-d0);
+            amount1 -= uint256(d1);
         }
         return (amount0, amount1);
     }
@@ -925,17 +926,7 @@ contract LPManager is IUniswapV3SwapCallback {
      * @return out Exact output amount received
      */
     function _swap(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo) internal returns (uint256 out) {
-        // Skip empty swaps to save gas
-        if (amount == 0) return 0;
-        (int256 amount0, int256 amount1) = IUniswapV3Pool(poolInfo.pool).swap(
-            address(this),
-            zeroForOne,
-            int256(amount),
-            zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
-            zeroForOne
-                ? abi.encode(poolInfo.token0, poolInfo.token1, poolInfo.fee)
-                : abi.encode(poolInfo.token1, poolInfo.token0, poolInfo.fee)
-        );
+        (int256 amount0, int256 amount1) = _swapWithPriceLimit(zeroForOne, amount, poolInfo, 0);
         // Output amount is the negative leg (exact input convention)
         out = uint256(-(zeroForOne ? amount1 : amount0));
     }
@@ -951,7 +942,7 @@ contract LPManager is IUniswapV3SwapCallback {
      * @return amount0 Signed token0 delta (positive = we pay token0)
      * @return amount1 Signed token1 delta (positive = we pay token1)
      */
-    function _swapWithPriceLimit(bool zeroForOne, int256 amount, PoolInfo memory poolInfo, uint160 sqrtPriceLimitX96)
+    function _swapWithPriceLimit(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo, uint160 sqrtPriceLimitX96)
         internal
         returns (int256 amount0, int256 amount1)
     {
@@ -962,7 +953,7 @@ contract LPManager is IUniswapV3SwapCallback {
         (amount0, amount1) = IUniswapV3Pool(poolInfo.pool).swap(
             address(this),
             zeroForOne,
-            amount,
+            int256(amount),
             sqrtPriceLimitX96,
             zeroForOne
                 ? abi.encode(poolInfo.token0, poolInfo.token1, poolInfo.fee)
