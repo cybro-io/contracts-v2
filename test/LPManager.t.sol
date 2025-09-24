@@ -354,25 +354,23 @@ contract LPManagerTestBaseChain is LPManagerTest {
         super.setUp();
     }
 
-    // function test(uint256 amountIn0, uint256 amountIn1, int24 tickLower, int24 tickUpper, int24 newLower) public {
-    //     vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
-    //     vm.assume(amountIn1 < 8e11 && amountIn1 > 1e6);
-    //     (, int24 currentTick,,,,,) = pool.slot0();
-    //     int24 tickSpacing = pool.tickSpacing();
-    //     tickLower = int24(bound(tickLower, currentTick - 1e5, currentTick + 100));
-    //     tickUpper = int24(bound(tickUpper, tickLower + 100, currentTick + 1e5));
-    //     tickLower -= tickLower % tickSpacing;
-    //     tickUpper -= tickUpper % tickSpacing;
+    function test(uint256 amountIn0, uint256 amountIn1, int24 tickLower, int24 tickUpper, int24 newLower) public {
+        vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
+        vm.assume(amountIn1 < 8e11 && amountIn1 > 1e6);
+        (, int24 currentTick,,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        tickLower = int24(bound(tickLower, currentTick - 1e5, currentTick + 100));
+        tickUpper = int24(bound(tickUpper, tickLower + 100, currentTick + 1e5));
+        tickLower -= tickLower % tickSpacing;
+        tickUpper -= tickUpper % tickSpacing;
 
-    //     newLower = int24(bound(tickLower, currentTick - 3e3, currentTick + 3e3));
-    //     newLower -= newLower % tickSpacing;
-    //     int24 newUpper = newLower + 3000;
-    //     baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
-    // }
+        newLower = int24(bound(tickLower, currentTick - 3e3, currentTick + 3e3));
+        newLower -= newLower % tickSpacing;
+        int24 newUpper = newLower + 3000;
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+    }
 
     function test2() public {
-        // vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
-        // vm.assume(amountIn1 < 8e11 && amountIn1 > 1e6);
         (uint160 currentPrice, int24 currentTick,,,,,) = pool.slot0();
         int24 tickSpacing = pool.tickSpacing();
         currentTick -= currentTick % tickSpacing;

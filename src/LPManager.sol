@@ -23,7 +23,6 @@ import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.
  *      The contract assumes NFT ownership stays with the user. For actions that require
  *      token/NFT movements, the user must approve allowances to this contract.
  */
-
 contract LPManager is IUniswapV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
 
@@ -741,17 +740,36 @@ contract LPManager is IUniswapV3SwapCallback {
             _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
 
         want1 = _getAmount0In1(prices.current, want1);
-        if (amount0 > want0) {
-            uint160 limit = _priceLimitForExcess(true, prices);
 
-            (int256 d0, int256 d1) = _swapWithPriceLimit(true, amount0 - want0, ctx.poolInfo, limit);
-            amount0 -= uint256(d0);
-            amount1 += uint256(-d1);
-        } else if (amount1 > want1) {
-            uint160 limit = _priceLimitForExcess(false, prices);
-            (int256 d0, int256 d1) = _swapWithPriceLimit(false, amount1 - want1, ctx.poolInfo, limit);
-            amount0 += uint256(-d0);
-            amount1 -= uint256(d1);
+        for (uint8 i = 0; i < 2; i++) {
+            if (amount0 > want0) {
+                uint256 excessIn0 = amount0 > want0 ? amount0 - want0 : 0;
+                if (excessIn0 <= 1e2) break;
+
+                (int256 d0, int256 d1) = _swapWithPriceLimit(true, excessIn0 * 998e1 / PRECISION, ctx.poolInfo, 0);
+                prices.current = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
+                amount0 -= uint256(d0);
+                amount1 += uint256(-d1);
+                (want0, want1) = _getAmountsInBothTokens(
+                    amount0 + _getAmount1In0(prices.current, want1), prices.current, prices.lower, prices.upper
+                );
+                want1 = _getAmount0In1(prices.current, want1);
+            } else if (amount1 > want1) {
+                uint256 excessIn1 = amount1 > want1 ? amount1 - want1 : 0;
+                if (excessIn1 <= 1e2) break;
+
+                (int256 d0, int256 d1) = _swapWithPriceLimit(false, excessIn1 * 998e1 / PRECISION, ctx.poolInfo, 0);
+                prices.current = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
+                amount0 += uint256(-d0);
+                amount1 -= uint256(d1);
+                (want0, want1) = _getAmountsInBothTokens(
+                    amount0 + _getAmount1In0(prices.current, want1), prices.current, prices.lower, prices.upper
+                );
+
+                want1 = _getAmount0In1(prices.current, want1);
+            } else {
+                break;
+            }
         }
         return (amount0, amount1);
     }
@@ -764,28 +782,6 @@ contract LPManager is IUniswapV3SwapCallback {
         prices.current = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
         prices.lower = TickMath.getSqrtRatioAtTick(ctx.tickLower);
         prices.upper = TickMath.getSqrtRatioAtTick(ctx.tickUpper);
-    }
-
-    /**
-     * @notice Computes a conservative sqrtPriceLimitX96 for bounded swaps when rebalancing
-     * @dev Prevents price from crossing the position range during the swap. If current price is
-     *      already beyond the corresponding bound, returns that bound; if price is inside the
-     *      range, returns a value slightly inside the bound; otherwise returns 0 to use default.
-     * @param zeroForOne true if selling token0 for token1, false otherwise
-     * @return limit Sqrt price limit to be used in swap
-     */
-    function _priceLimitForExcess(bool zeroForOne, Prices memory prices) private pure returns (uint160 limit) {
-        if (zeroForOne) {
-            // Selling token0 makes price go down: guard at upper if outside, else lower if inside
-            if (prices.current >= prices.upper) return prices.upper;
-            if (prices.current > prices.lower) return prices.lower;
-            return 0;
-        } else {
-            // Selling token1 makes price go up: guard at lower if outside, else upper if inside
-            if (prices.current <= prices.lower) return prices.lower;
-            if (prices.current < prices.upper) return prices.upper;
-            return 0;
-        }
     }
 
     function _getAmountsInBothTokens(
@@ -942,8 +938,6 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Executes a swap with a conservative sqrt price limit for rebalancing
-     * @dev If limit is zero, uses an extreme limit to avoid accidental reverts, but
-     *      in rebalancing flows limit should be chosen via _priceLimitForExcess.
      * @param zeroForOne true for token0->token1 swap, false for token1->token0
      * @param amount The amount of the swap, which implicitly configures the swap as exact input (positive), or exact output (negative)
      * @param poolInfo Pool metadata (addresses and fee)
