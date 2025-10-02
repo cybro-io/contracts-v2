@@ -18,7 +18,7 @@ interface IProtocolFeeCollector {
     // -------- External --------
     function setFees(uint256 _liquidityFeeBps, uint256 _feesFeeBps, uint256 _depositFeeBps) external;
 
-    function setLiquitityProtocolFee(uint256 feeBps) external;
+    function setLiquidityProtocolFee(uint256 feeBps) external;
     function setFeesProtocolFee(uint256 feeBps) external;
     function setDepositProtocolFee(uint256 feeBps) external;
 
@@ -28,7 +28,5 @@ interface IProtocolFeeCollector {
     // -------- Views --------
     function getAccumulatedProtocolFees(address token) external view returns (uint256);
 
-    function calculateLiquidityProtocolFee(uint256 liquidityOrAmount) external view returns (uint256);
-    function calculateFeesProtocolFee(uint256 collectedAmount) external view returns (uint256);
-    function calculateDepositProtocolFee(uint256 depositAmount) external view returns (uint256);
+    function calculateProtocolFee(uint256 amount, FeeType feeType) external view returns (uint256);
 }

@@ -9,7 +9,6 @@ import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Po
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v3-core/contracts/libraries/FixedPoint96.sol";
 import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.sol";
@@ -17,11 +16,20 @@ import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.
 /**
  * @title LPManager
  * @notice High-level helper contract for managing Uniswap V3 liquidity positions.
- * @dev Wraps common flows: create position, claim fees (optionally in a single token),
+ * @dev Wraps common flows: create a position, claim fees (optionally in a single token),
  *      compound fees back into the position, increase liquidity with auto-rebalancing of inputs,
- *      move range by migrating liquidity, and withdraw in one or two tokens.
- *      The contract assumes NFT ownership stays with the user. For actions that require
- *      token/NFT movements, the user must approve allowances to this contract.
+ *      migrate a position range, and withdraw in one or two tokens.
+ *
+ *      Key behavior and assumptions:
+ *      - The contract is a helper: the NFT remains owned by the user; approvals are required
+ *        for both the Uniswap `positionManager` and ERC20 tokens.
+ *      - Protocol fees are charged via an external `protocolFeeCollector` and may differ by flow:
+ *          • createPosition/_openPosition: FeeType.LIQUIDITY on provided amounts
+ *          • increaseLiquidity:         FeeType.DEPOSIT on added amounts
+ *          • compoundFees:              FeeType.FEES on accrued rewards only
+ *          • withdraw/moveRange:        FeeType.LIQUIDITY on withdrawn outputs
+ *      - Some flows perform swaps to rebalance inputs. Swaps use conservative price limits when
+ *        rebalancing to avoid crossing the range unexpectedly.
  */
 contract LPManager is IUniswapV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
@@ -119,7 +127,7 @@ contract LPManager is IUniswapV3SwapCallback {
     /// @param amount1 Actual amount of token1 supplied
     /// @param tickLower Lower tick boundary
     /// @param tickUpper Upper tick boundary
-    /// @param price Current pool price (token1 per token0) at creation
+    /// @param sqrtPriceX96 Current pool sqrt price (Q96) at creation
     event PositionCreated(
         uint256 indexed positionId,
         uint128 liquidity,
@@ -127,7 +135,7 @@ contract LPManager is IUniswapV3SwapCallback {
         uint256 amount1,
         int24 tickLower,
         int24 tickUpper,
-        uint256 price
+        uint256 sqrtPriceX96
     );
     /// @notice Emitted after fees are claimed in both tokens
     event ClaimedFees(uint256 indexed positionId, uint256 amount0, uint256 amount1);
@@ -176,7 +184,7 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /* ============ CONSTANTS ============ */
 
-    /// @notice Precision for calculations (basis points, 1e4 = 100%)
+    /// @notice Precision for calculations expressed in basis points (1e4 = 100%)
     uint32 public constant PRECISION = 1e4;
 
     /* ============ IMMUTABLE VARIABLES ============ */
@@ -193,6 +201,8 @@ contract LPManager is IUniswapV3SwapCallback {
         factory = IUniswapV3Factory(_positionManager.factory());
     }
 
+    /// @notice Restricts a call to the owner of `positionId` in the Uniswap position manager
+    /// @dev Reads the owner from `positionManager.ownerOf(positionId)` and reverts otherwise
     modifier onlyPositionOwner(uint256 positionId) {
         require(positionManager.ownerOf(positionId) == msg.sender, NotPositionOwner());
         _;
@@ -203,12 +213,12 @@ contract LPManager is IUniswapV3SwapCallback {
     /**
      * @notice Returns a comprehensive snapshot of a position including live unclaimed fees and current price
      * @param positionId The Uniswap V3 position token id
-     * @return position A populated Position struct with pool, tokens, liquidity, fees and price
+     * @return position Populated struct with pool, tokens, liquidity, unclaimed/claimed fees and price
      */
     function getPosition(uint256 positionId) external view returns (Position memory position) {
         RawPositionData memory rawData = _getRawPositionData(positionId);
         address poolAddress = _getPool(rawData.token0, rawData.token1, rawData.fee);
-        (uint256 unclaimedFee0, uint256 unclamedFee1) = _calculateUnclaimedFees(
+        (uint256 unclaimedFee0, uint256 unclaimedFee1) = _calculateUnclaimedFees(
             poolAddress,
             rawData.tickLower,
             rawData.tickUpper,
@@ -224,7 +234,7 @@ contract LPManager is IUniswapV3SwapCallback {
             token1: rawData.token1,
             liquidity: rawData.liquidity,
             unclaimedFee0: unclaimedFee0,
-            unclaimedFee1: unclamedFee1,
+            unclaimedFee1: unclaimedFee1,
             claimedFee0: rawData.claimedFee0,
             claimedFee1: rawData.claimedFee1,
             tickLower: rawData.tickLower,
@@ -261,14 +271,15 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Creates a new Uniswap V3 position with best-effort input rebalancing to maximize liquidity
-     * @dev Pulls tokens from msg.sender, applies protocol deposit fee, rebalances inputs,
-     *      mints the position for the recipient and returns actual amounts used.
+     * @dev Pulls tokens from `msg.sender`, applies protocol LIQUIDITY fee on inputs, then rebalances via bounded
+     *      swaps and mints the position. Any unused tokens are returned to `msg.sender`.
+     *      Reverts if minted liquidity is less than `minLiquidity`.
      * @param poolAddress Target pool address
      * @param amountIn0 Amount of token0 to supply (before protocol fee)
      * @param amountIn1 Amount of token1 to supply (before protocol fee)
      * @param tickLower Lower tick bound
      * @param tickUpper Upper tick bound
-     * @param recipient Receiver of the NFT
+     * @param recipient NFT recipient
      * @param minLiquidity Minimal acceptable liquidity minted
      * @return positionId New NFT id
      * @return liquidity Minted liquidity
@@ -302,10 +313,12 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Claims all accrued fees for a position in both tokens
+     * @dev Applies protocol FEES fee on the claimed rewards, then transfers both tokens to `recipient`.
+     *      Reverts if caller is not the position owner.
      * @param positionId Position id
      * @param recipient Receiver of the claimed fees
-     * @param minAmountOut0 Minimal acceptable token0 amount to protect against unexpected slippage
-     * @param minAmountOut1 Minimal acceptable token1 amount to protect against unexpected slippage
+     * @param minAmountOut0 Minimal acceptable token0 amount (post-fee)
+     * @param minAmountOut1 Minimal acceptable token1 amount (post-fee)
      */
     function claimFees(uint256 positionId, address recipient, uint256 minAmountOut0, uint256 minAmountOut1)
         external
@@ -319,10 +332,13 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Claims all accrued fees for a position and swaps them into a single token
+     * @dev Applies protocol FEES fee, then performs an internal swap in the pool for the non-selected token.
+     *      The final `amountOut` is post-fee and post-swap. Reverts if caller is not the position owner
+     *      or if `tokenOut` is neither token0 nor token1 of the pool.
      * @param positionId Position id
      * @param recipient Receiver of the claimed fees
      * @param tokenOut Desired output token (must be pool token0 or token1)
-     * @param minAmountOut Minimal acceptable output amount
+     * @param minAmountOut Minimal acceptable output amount (post-fee and post-swap)
      */
     function claimFees(uint256 positionId, address recipient, address tokenOut, uint256 minAmountOut)
         external
@@ -334,7 +350,6 @@ contract LPManager is IUniswapV3SwapCallback {
         (uint256 amount0, uint256 amount1) = _claimFees(
             positionId, recipient, tokenOut == poolInfo.token0 ? TransferInfoInToken.TOKEN0 : TransferInfoInToken.TOKEN1
         );
-        // do we need to check that amount0 and amount1 are not 0?
         amountOut = amount0 == 0 ? amount1 : amount0;
         require(amountOut >= minAmountOut, AmountLessThanMin());
         emit ClaimedFeesInToken(positionId, tokenOut, amountOut);
@@ -342,6 +357,9 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Adds liquidity to an existing position using input auto-rebalancing
+     * @dev Pulls tokens from `msg.sender`, applies protocol DEPOSIT fee, rebalances and increases liquidity.
+     *      Any unused tokens are returned to `msg.sender`. Reverts if resulting liquidity increase is
+     *      less than `minLiquidity`.
      * @param positionId Position id
      * @param amountIn0 Amount of token0 to add (before protocol fee)
      * @param amountIn1 Amount of token1 to add (before protocol fee)
@@ -355,11 +373,11 @@ contract LPManager is IUniswapV3SwapCallback {
 
         if (amountIn0 > 0) {
             IERC20Metadata(ctx.poolInfo.token0).safeTransferFrom(msg.sender, address(this), amountIn0);
-            amountIn0 = _collectDepositProtocolFee(ctx.poolInfo.token0, amountIn0);
+            amountIn0 = _collectProtocolFee(ctx.poolInfo.token0, amountIn0, IProtocolFeeCollector.FeeType.DEPOSIT);
         }
         if (amountIn1 > 0) {
             IERC20Metadata(ctx.poolInfo.token1).safeTransferFrom(msg.sender, address(this), amountIn1);
-            amountIn1 = _collectDepositProtocolFee(ctx.poolInfo.token1, amountIn1);
+            amountIn1 = _collectProtocolFee(ctx.poolInfo.token1, amountIn1, IProtocolFeeCollector.FeeType.DEPOSIT);
         }
 
         (liquidity, added0, added1) = _increaseLiquidity(positionId, ctx, amountIn0, amountIn1, minLiquidity);
@@ -369,6 +387,8 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Compounds currently accrued fees back into the same position using auto-rebalancing
+     * @dev Only callable by the position owner. Collects pending fees, applies protocol FEES fee,
+     *      rebalances and increases liquidity on the same position.
      * @param positionId Position id
      * @param minLiquidity Minimal acceptable liquidity increase
      */
@@ -380,8 +400,8 @@ contract LPManager is IUniswapV3SwapCallback {
         PositionContext memory ctx = _getPositionContext(positionId);
         (uint256 fees0, uint256 fees1) = _collect(positionId);
 
-        fees0 = _collectFeesProtocolFee(ctx.poolInfo.token0, fees0);
-        fees1 = _collectFeesProtocolFee(ctx.poolInfo.token1, fees1);
+        fees0 = _collectProtocolFee(ctx.poolInfo.token0, fees0, IProtocolFeeCollector.FeeType.FEES);
+        fees1 = _collectProtocolFee(ctx.poolInfo.token1, fees1, IProtocolFeeCollector.FeeType.FEES);
 
         (liquidity, added0, added1) = _increaseLiquidity(positionId, ctx, fees0, fees1, minLiquidity);
 
@@ -390,10 +410,15 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Migrates liquidity to a new range by withdrawing and minting a new position within the same pool
+     * @dev Only callable by the position owner. Withdraws 100% of liquidity, collects any pending tokens,
+     *      applies protocol LIQUIDITY fee on the amounts, and opens a new position with the provided range.
+     *      This effectively charges the LIQUIDITY fee on principal and accrued fees;
+     *      Reverts if minted liquidity is less than `minLiquidity`.
      * @param positionId Position id to migrate from
      * @param recipient Recipient of the new position
      * @param newLower New lower tick
      * @param newUpper New upper tick
+     * @param minLiquidity Minimal acceptable liquidity for the new position
      * @return newPositionId Newly minted NFT id
      * @return liquidity Minted liquidity in the new position
      * @return amount0 Amount of token0 supplied in the new position
@@ -417,11 +442,13 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Withdraws a percentage of liquidity and transfers both tokens to a recipient
+     * @dev Only callable by the position owner. Applies protocol LIQUIDITY fee on withdrawn amounts
+     *      before transferring to `recipient`.
      * @param positionId Position id
      * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
      * @param recipient Receiver of withdrawn tokens
-     * @param minAmountOut0 Minimal acceptable token0 amount
-     * @param minAmountOut1 Minimal acceptable token1 amount
+     * @param minAmountOut0 Minimal acceptable token0 amount (post-fee)
+     * @param minAmountOut1 Minimal acceptable token1 amount (post-fee)
      */
     function withdraw(
         uint256 positionId,
@@ -432,8 +459,8 @@ contract LPManager is IUniswapV3SwapCallback {
     ) external returns (uint256 amount0, uint256 amount1) {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         (amount0, amount1) = _withdraw(positionId, percent);
-        amount0 = _collectLiquidityProtocolFee(poolInfo.token0, amount0);
-        amount1 = _collectLiquidityProtocolFee(poolInfo.token1, amount1);
+        amount0 = _collectProtocolFee(poolInfo.token0, amount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        amount1 = _collectProtocolFee(poolInfo.token1, amount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
         require(amount0 >= minAmountOut0, Amount0LessThanMin());
         require(amount1 >= minAmountOut1, Amount1LessThanMin());
         if (amount0 > 0) {
@@ -447,11 +474,13 @@ contract LPManager is IUniswapV3SwapCallback {
 
     /**
      * @notice Withdraws a percentage of liquidity and swaps the proceeds into a single token
+     * @dev Only callable by the position owner. Applies protocol LIQUIDITY fee after performing the
+     *      internal swap, then transfers `amountOut` to `recipient`.
      * @param positionId Position id
      * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
      * @param recipient Receiver of withdrawn tokens
      * @param tokenOut Desired output token (must be pool token0 or token1)
-     * @param minAmountOut Minimal acceptable output
+     * @param minAmountOut Minimal acceptable output (post-fee and post-swap)
      */
     function withdraw(uint256 positionId, uint32 percent, address recipient, address tokenOut, uint256 minAmountOut)
         external
@@ -461,9 +490,13 @@ contract LPManager is IUniswapV3SwapCallback {
         require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
         (uint256 amount0, uint256 amount1) = _withdraw(positionId, percent);
         if (tokenOut == poolInfo.token0) {
-            amountOut = _collectLiquidityProtocolFee(poolInfo.token0, amount0 + _swap(false, amount1, poolInfo));
+            amountOut = _collectProtocolFee(
+                poolInfo.token0, amount0 + _swap(false, amount1, poolInfo), IProtocolFeeCollector.FeeType.LIQUIDITY
+            );
         } else {
-            amountOut = _collectLiquidityProtocolFee(poolInfo.token1, amount1 + _swap(true, amount0, poolInfo));
+            amountOut = _collectProtocolFee(
+                poolInfo.token1, amount1 + _swap(true, amount0, poolInfo), IProtocolFeeCollector.FeeType.LIQUIDITY
+            );
         }
         require(amountOut >= minAmountOut, AmountLessThanMin());
         IERC20Metadata(tokenOut).safeTransfer(recipient, amountOut);
@@ -533,8 +566,8 @@ contract LPManager is IUniswapV3SwapCallback {
     {
         (PoolInfo memory poolInfo) = _getPoolInfoById(positionId);
         (amount0, amount1) = _collect(positionId);
-        amount0 = _collectFeesProtocolFee(poolInfo.token0, amount0);
-        amount1 = _collectFeesProtocolFee(poolInfo.token1, amount1);
+        amount0 = _collectProtocolFee(poolInfo.token0, amount0, IProtocolFeeCollector.FeeType.FEES);
+        amount1 = _collectProtocolFee(poolInfo.token1, amount1, IProtocolFeeCollector.FeeType.FEES);
         if (transferInfoInToken != TransferInfoInToken.BOTH) {
             if (transferInfoInToken == TransferInfoInToken.TOKEN0) {
                 amount0 += _swap(false, amount1, poolInfo);
@@ -599,8 +632,8 @@ contract LPManager is IUniswapV3SwapCallback {
         address recipient,
         uint256 minLiquidity
     ) internal returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
-        amount0 = _collectLiquidityProtocolFee(ctx.poolInfo.token0, amount0);
-        amount1 = _collectLiquidityProtocolFee(ctx.poolInfo.token1, amount1);
+        amount0 = _collectProtocolFee(ctx.poolInfo.token0, amount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        amount1 = _collectProtocolFee(ctx.poolInfo.token1, amount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
         // find optimal amounts
         (amount0, amount1) = _toOptimalRatio(ctx, amount0, amount1);
         _ensureAllowance(ctx.poolInfo.token0, amount0);
@@ -710,6 +743,14 @@ contract LPManager is IUniswapV3SwapCallback {
         );
     }
 
+    function _getAmount1In0(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
+        return FullMath.mulDiv(amount1, 2 ** 192, uint256(currentPrice) * uint256(currentPrice));
+    }
+
+    function _getAmount0In1(uint256 currentPrice, uint256 amount0) internal pure returns (uint256 amount0In1) {
+        return FullMath.mulDiv(amount0, uint256(currentPrice) * uint256(currentPrice), 2 ** 192);
+    }
+
     /**
      * @notice Rebalances input amounts towards the optimal proportion for the given price range
      * @dev Computes desired amounts via _getAmountsInBothTokens. If one side has an excess over
@@ -727,11 +768,11 @@ contract LPManager is IUniswapV3SwapCallback {
     {
         Prices memory prices = _currentLowerUpper(ctx);
         // Compute desired amounts for target liquidity under current price and bounds
-        uint256 amount1In0 = FullMath.mulDiv(amount1, 2 ** 192, uint256(prices.current) * uint256(prices.current));
+        uint256 amount1In0 = _getAmount1In0(prices.current, amount1);
         (uint256 want0, uint256 want1) =
             _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
 
-        (want0, want1) = (want0, FullMath.mulDiv(want1, uint256(prices.current) * uint256(prices.current), 2 ** 192));
+        want1 = _getAmount0In1(prices.current, want1);
         if (amount0 > want0) {
             uint160 limit = _priceLimitForExcess(true, prices);
 
@@ -799,46 +840,20 @@ contract LPManager is IUniswapV3SwapCallback {
     }
 
     /**
-     * @notice Deducts protocol fee from claimed fees
-     * @dev Calculates and transfers fees protocol fee, returns net amount
-     * @param token Token address to collect fee from
-     * @param amount Gross fee amount
-     * @return Net amount after protocol fee deduction
+     * @notice Collects protocol fee from the given amount
+     * @param token Token address
+     * @param amount Amount of tokens to collect fee from
+     * @param feeType Type of fee to collect (LIQUIDITY, DEPOSIT, FEES)
+     * @return amount Amount of tokens after collecting fee
      */
-    function _collectFeesProtocolFee(address token, uint256 amount) private returns (uint256) {
+    function _collectProtocolFee(address token, uint256 amount, IProtocolFeeCollector.FeeType feeType)
+        private
+        returns (uint256)
+    {
         if (amount == 0) return 0;
-        uint256 feesProtocolFee = protocolFeeCollector.calculateFeesProtocolFee(amount);
-        IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), feesProtocolFee);
-        return amount - feesProtocolFee;
-    }
-
-    /**
-     * @notice Deducts protocol fee from withdrawn liquidity
-     * @dev Calculates and transfers liquidity protocol fee, returns net amount
-     * @param token Token address to collect fee from
-     * @param amount Gross withdrawal amount
-     * @return Net amount after protocol fee deduction
-     */
-    function _collectLiquidityProtocolFee(address token, uint256 amount) private returns (uint256) {
-        if (amount == 0) return 0;
-        uint256 liquidityProtocolFee = protocolFeeCollector.calculateLiquidityProtocolFee(amount);
-        IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), liquidityProtocolFee);
-        return amount - liquidityProtocolFee;
-    }
-
-    /**
-     * @notice Deducts protocol fee from deposit amounts
-     * @dev Calculates and transfers deposit protocol fee, returns net amount
-     * @param token Token address to collect fee from
-     * @param amount Gross deposit amount
-     * @return Net amount after protocol fee deduction
-     * @custom:reverts LPManager__AmountLessThanProtocolFee if fee >= amount
-     */
-    function _collectDepositProtocolFee(address token, uint256 amount) private returns (uint256) {
-        if (amount == 0) return 0;
-        uint256 depositProtocolFee = protocolFeeCollector.calculateDepositProtocolFee(amount);
-        IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), depositProtocolFee);
-        return amount - depositProtocolFee;
+        uint256 protocolFee = protocolFeeCollector.calculateProtocolFee(amount, feeType);
+        IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), protocolFee);
+        return amount - protocolFee;
     }
 
     function _calculateUnclaimedFees(
