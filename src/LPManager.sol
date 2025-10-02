@@ -743,14 +743,6 @@ contract LPManager is IUniswapV3SwapCallback {
         );
     }
 
-    function _getAmount1In0(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
-        return FullMath.mulDiv(amount1, 2 ** 192, uint256(currentPrice) * uint256(currentPrice));
-    }
-
-    function _getAmount0In1(uint256 currentPrice, uint256 amount0) internal pure returns (uint256 amount0In1) {
-        return FullMath.mulDiv(amount0, uint256(currentPrice) * uint256(currentPrice), 2 ** 192);
-    }
-
     /**
      * @notice Rebalances input amounts towards the optimal proportion for the given price range
      * @dev Computes desired amounts via _getAmountsInBothTokens. If one side has an excess over
@@ -768,11 +760,11 @@ contract LPManager is IUniswapV3SwapCallback {
     {
         Prices memory prices = _currentLowerUpper(ctx);
         // Compute desired amounts for target liquidity under current price and bounds
-        uint256 amount1In0 = _getAmount1In0(prices.current, amount1);
+        uint256 amount1In0 = FullMath.mulDiv(amount1, 2 ** 192, uint256(prices.current) * uint256(prices.current));
         (uint256 want0, uint256 want1) =
             _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
 
-        want1 = _getAmount0In1(prices.current, want1);
+        want1 = FullMath.mulDiv(want1, uint256(prices.current) * uint256(prices.current), 2 ** 192);
         if (amount0 > want0) {
             uint160 limit = _priceLimitForExcess(true, prices);
 
