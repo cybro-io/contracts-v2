@@ -12,6 +12,7 @@ import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v3-core/contracts/libraries/FixedPoint96.sol";
 import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.sol";
+import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 
 /**
  * @title LPManager
@@ -267,6 +268,230 @@ contract LPManager is IUniswapV3SwapCallback {
         });
     }
 
+    /* ============ PREVIEW FUNCTIONS ============ */
+
+    /**
+     * @notice Preview the result of creating a new position without executing the transaction
+     * @param poolAddress Target pool address
+     * @param amountIn0 Amount of token0 to supply (before protocol fee)
+     * @param amountIn1 Amount of token1 to supply (before protocol fee)
+     * @param tickLower Lower tick bound
+     * @param tickUpper Upper tick bound
+     * @return liquidity Expected minted liquidity
+     * @return amount0Used Expected amount of token0 used
+     * @return amount1Used Expected amount of token1 used
+     */
+    function previewCreatePosition(
+        address poolAddress,
+        uint256 amountIn0,
+        uint256 amountIn1,
+        int24 tickLower,
+        int24 tickUpper
+    ) external view returns (uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+        PoolInfo memory poolInfo = getPoolInfo(poolAddress);
+        PositionContext memory ctx = PositionContext({poolInfo: poolInfo, tickLower: tickLower, tickUpper: tickUpper});
+
+        // Apply protocol fee
+        uint256 amount0AfterFee =
+            _previewCollectProtocolFee(ctx.poolInfo.token0, amountIn0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        uint256 amount1AfterFee =
+            _previewCollectProtocolFee(ctx.poolInfo.token1, amountIn1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+
+        // Calculate optimal amounts
+        (amount0AfterFee, amount1AfterFee) = _previewToOptimalRatio(ctx, amount0AfterFee, amount1AfterFee);
+
+        // Calculate liquidity and amounts used
+        (liquidity, amount0Used, amount1Used) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
+    }
+
+    /**
+     * @notice Preview the result of claiming fees in both tokens
+     * @param positionId Position id
+     * @return amount0 Expected amount of token0 claimed (after protocol fee)
+     * @return amount1 Expected amount of token1 claimed (after protocol fee)
+     */
+    function previewClaimFees(uint256 positionId) external view returns (uint256 amount0, uint256 amount1) {
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
+        (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
+
+        amount0 = _previewCollectProtocolFee(poolInfo.token0, fees0, IProtocolFeeCollector.FeeType.FEES);
+        amount1 = _previewCollectProtocolFee(poolInfo.token1, fees1, IProtocolFeeCollector.FeeType.FEES);
+    }
+
+    /**
+     * @notice Preview the result of claiming fees in a single token
+     * @param positionId Position id
+     * @param tokenOut Desired output token (must be pool token0 or token1)
+     * @return amountOut Expected output amount (post-fee and post-swap)
+     */
+    function previewClaimFees(uint256 positionId, address tokenOut) external view returns (uint256 amountOut) {
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
+        require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
+
+        (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
+
+        if (tokenOut == poolInfo.token0) {
+            uint256 swappedAmount = _previewSwap(false, fees1, poolInfo);
+            uint256 totalAmount = fees0 + swappedAmount;
+            amountOut = _previewCollectProtocolFee(poolInfo.token0, totalAmount, IProtocolFeeCollector.FeeType.FEES);
+        } else {
+            uint256 swappedAmount = _previewSwap(true, fees0, poolInfo);
+            uint256 totalAmount = fees1 + swappedAmount;
+            amountOut = _previewCollectProtocolFee(poolInfo.token1, totalAmount, IProtocolFeeCollector.FeeType.FEES);
+        }
+    }
+
+    /**
+     * @notice Preview the result of increasing liquidity
+     * @param positionId Position id
+     * @param amountIn0 Amount of token0 to add (before protocol fee)
+     * @param amountIn1 Amount of token1 to add (before protocol fee)
+     * @return liquidity Expected liquidity increase
+     * @return added0 Expected amount of token0 added
+     * @return added1 Expected amount of token1 added
+     */
+    function previewIncreaseLiquidity(uint256 positionId, uint256 amountIn0, uint256 amountIn1)
+        external
+        view
+        returns (uint128 liquidity, uint256 added0, uint256 added1)
+    {
+        PositionContext memory ctx = _getPositionContext(positionId);
+
+        // Apply protocol fee
+        uint256 amount0AfterFee =
+            _previewCollectProtocolFee(ctx.poolInfo.token0, amountIn0, IProtocolFeeCollector.FeeType.DEPOSIT);
+        uint256 amount1AfterFee =
+            _previewCollectProtocolFee(ctx.poolInfo.token1, amountIn1, IProtocolFeeCollector.FeeType.DEPOSIT);
+
+        // Calculate optimal amounts
+        (amount0AfterFee, amount1AfterFee) = _previewToOptimalRatio(ctx, amount0AfterFee, amount1AfterFee);
+
+        // Calculate liquidity increase
+        (liquidity, added0, added1) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
+    }
+
+    /**
+     * @notice Preview the result of compounding fees
+     * @param positionId Position id
+     * @return liquidity Expected liquidity increase
+     * @return added0 Expected amount of token0 added
+     * @return added1 Expected amount of token1 added
+     */
+    function previewCompoundFees(uint256 positionId)
+        external
+        view
+        returns (uint128 liquidity, uint256 added0, uint256 added1)
+    {
+        PositionContext memory ctx = _getPositionContext(positionId);
+        (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
+
+        // Apply protocol fee
+        uint256 amount0AfterFee =
+            _previewCollectProtocolFee(ctx.poolInfo.token0, fees0, IProtocolFeeCollector.FeeType.FEES);
+        uint256 amount1AfterFee =
+            _previewCollectProtocolFee(ctx.poolInfo.token1, fees1, IProtocolFeeCollector.FeeType.FEES);
+
+        // Calculate optimal amounts
+        (amount0AfterFee, amount1AfterFee) = _previewToOptimalRatio(ctx, amount0AfterFee, amount1AfterFee);
+
+        // Calculate liquidity increase
+        (liquidity, added0, added1) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
+    }
+
+    /**
+     * @notice Preview the result of moving range (migrating liquidity)
+     * @param positionId Position id to migrate from
+     * @param newLower New lower tick
+     * @param newUpper New upper tick
+     * @return liquidity Expected minted liquidity in the new position
+     * @return amount0 Expected amount of token0 supplied in the new position
+     * @return amount1 Expected amount of token1 supplied in the new position
+     */
+    function previewMoveRange(uint256 positionId, int24 newLower, int24 newUpper)
+        external
+        view
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1)
+    {
+        PositionContext memory ctx = _getPositionContext(positionId);
+
+        // Get current liquidity and fees
+        (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
+
+        // Calculate amounts from decreasing liquidity
+        (uint256 amount0FromLiquidity, uint256 amount1FromLiquidity) = _previewDecreaseLiquidity(positionId, PRECISION);
+
+        // Total amounts available
+        uint256 totalAmount0 = amount0FromLiquidity + fees0;
+        uint256 totalAmount1 = amount1FromLiquidity + fees1;
+
+        // Apply protocol fee
+        totalAmount0 =
+            _previewCollectProtocolFee(ctx.poolInfo.token0, totalAmount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        totalAmount1 =
+            _previewCollectProtocolFee(ctx.poolInfo.token1, totalAmount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+
+        // Update context with new range
+        ctx.tickLower = newLower;
+        ctx.tickUpper = newUpper;
+
+        // Calculate optimal amounts for new position
+        (totalAmount0, totalAmount1) = _previewToOptimalRatio(ctx, totalAmount0, totalAmount1);
+
+        // Calculate new position
+        (liquidity, amount0, amount1) = _previewMintPosition(ctx, totalAmount0, totalAmount1);
+    }
+
+    /**
+     * @notice Preview the result of withdrawing both tokens
+     * @param positionId Position id
+     * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
+     * @return amount0 Expected amount of token0 withdrawn (after protocol fee)
+     * @return amount1 Expected amount of token1 withdrawn (after protocol fee)
+     */
+    function previewWithdraw(uint256 positionId, uint32 percent)
+        external
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
+        (uint256 withdrawn0, uint256 withdrawn1) = _previewWithdraw(positionId, percent);
+
+        amount0 = _previewCollectProtocolFee(poolInfo.token0, withdrawn0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        amount1 = _previewCollectProtocolFee(poolInfo.token1, withdrawn1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+    }
+
+    /**
+     * @notice Preview the result of withdrawing to a single token
+     * @param positionId Position id
+     * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
+     * @param tokenOut Desired output token (must be pool token0 or token1)
+     * @return amountOut Expected output amount (post-fee and post-swap)
+     */
+    function previewWithdraw(uint256 positionId, uint32 percent, address tokenOut)
+        external
+        view
+        returns (uint256 amountOut)
+    {
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
+        require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
+
+        (uint256 withdrawn0, uint256 withdrawn1) = _previewWithdraw(positionId, percent);
+
+        if (tokenOut == poolInfo.token0) {
+            amountOut = _previewCollectProtocolFee(
+                poolInfo.token0,
+                withdrawn0 + _previewSwap(false, withdrawn1, poolInfo),
+                IProtocolFeeCollector.FeeType.LIQUIDITY
+            );
+        } else {
+            amountOut = _previewCollectProtocolFee(
+                poolInfo.token1,
+                withdrawn1 + _previewSwap(true, withdrawn0, poolInfo),
+                IProtocolFeeCollector.FeeType.LIQUIDITY
+            );
+        }
+    }
+
     /* ============ EXTERNAL FUNCTIONS ============ */
 
     /**
@@ -516,6 +741,170 @@ contract LPManager is IUniswapV3SwapCallback {
         return factory.getPool(token0, token1, fee);
     }
 
+    /* ============ INTERNAL PREVIEW FUNCTIONS ============ */
+
+    /**
+     * @notice Preview protocol fee collection without executing
+     * @param amount Amount of tokens to collect fee from
+     * @param feeType Type of fee to collect (LIQUIDITY, DEPOSIT, FEES)
+     * @return amount Amount of tokens after collecting fee
+     */
+    function _previewCollectProtocolFee(address, /* token */ uint256 amount, IProtocolFeeCollector.FeeType feeType)
+        internal
+        view
+        returns (uint256)
+    {
+        if (amount == 0) return 0;
+        uint256 protocolFee = protocolFeeCollector.calculateProtocolFee(amount, feeType);
+        return amount - protocolFee;
+    }
+
+    /**
+     * @notice Preview collecting fees without executing
+     * @param positionId Position id
+     * @return amount0 Amount of token0 that would be collected
+     * @return amount1 Amount of token1 that would be collected
+     */
+    function _previewCollect(uint256 positionId) internal view returns (uint256 amount0, uint256 amount1) {
+        RawPositionData memory rawData = _getRawPositionData(positionId);
+        address poolAddress = _getPool(rawData.token0, rawData.token1, rawData.fee);
+        (amount0, amount1) = _calculateUnclaimedFees(
+            poolAddress,
+            rawData.tickLower,
+            rawData.tickUpper,
+            rawData.liquidity,
+            rawData.feeGrowthInside0LastX128,
+            rawData.feeGrowthInside1LastX128
+        );
+
+        // Add already claimed fees
+        amount0 += rawData.claimedFee0;
+        amount1 += rawData.claimedFee1;
+    }
+
+    /**
+     * @notice Preview optimal ratio calculation without executing swaps
+     * @param ctx Position context
+     * @param amount0 Current token0 amount available
+     * @param amount1 Current token1 amount available
+     * @return amount0 Rebalanced token0 amount
+     * @return amount1 Rebalanced token1 amount
+     */
+    function _previewToOptimalRatio(PositionContext memory ctx, uint256 amount0, uint256 amount1)
+        internal
+        view
+        returns (uint256, uint256)
+    {
+        Prices memory prices = _currentLowerUpper(ctx);
+        // Compute desired amounts for target liquidity under current price and bounds
+        (uint256 want0, uint256 want1) = _getAmountsInBothTokens(
+            amount0 + _getAmount1In0(uint256(prices.current), amount1), prices.current, prices.lower, prices.upper
+        );
+
+        want1 = _getAmount0In1(uint256(prices.current), want1);
+
+        // For preview, we don't perform actual swaps, just return the optimal amounts
+        // In real execution, swaps would be performed to rebalance
+        return (want0, want1);
+    }
+
+    /**
+     * @notice Preview minting a new position without executing
+     * @param ctx Position context
+     * @param amount0 Amount of token0
+     * @param amount1 Amount of token1
+     * @return liquidity Expected minted liquidity
+     * @return amount0Used Expected amount of token0 used
+     * @return amount1Used Expected amount of token1 used
+     */
+    function _previewMintPosition(PositionContext memory ctx, uint256 amount0, uint256 amount1)
+        internal
+        view
+        returns (uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
+    {
+        // Get current price and tick boundaries using existing method
+        Prices memory prices = _currentLowerUpper(ctx);
+
+        // Calculate liquidity using LiquidityAmounts library
+        liquidity =
+            LiquidityAmounts.getLiquidityForAmounts(prices.current, prices.lower, prices.upper, amount0, amount1);
+
+        // Calculate actual amounts used
+        (amount0Used, amount1Used) =
+            LiquidityAmounts.getAmountsForLiquidity(prices.current, prices.lower, prices.upper, liquidity);
+    }
+
+    /**
+     * @notice Preview decreasing liquidity without executing
+     * @param positionId Position id
+     * @param percent Basis points of liquidity to decrease (1e4 = 100%)
+     * @return amount0 Expected amount of token0 received
+     * @return amount1 Expected amount of token1 received
+     */
+    function _previewDecreaseLiquidity(uint256 positionId, uint32 percent)
+        internal
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
+        uint128 totalLiquidity = _getTokenLiquidity(positionId);
+        uint128 liquidityToDecrease = totalLiquidity * percent / PRECISION;
+
+        // Get position context and prices using existing methods
+        PositionContext memory ctx = _getPositionContext(positionId);
+        Prices memory prices = _currentLowerUpper(ctx);
+
+        // Calculate amounts based on current price and position range using LiquidityAmounts
+        (amount0, amount1) =
+            LiquidityAmounts.getAmountsForLiquidity(prices.current, prices.lower, prices.upper, liquidityToDecrease);
+    }
+
+    /**
+     * @notice Preview withdrawing without executing
+     * @param positionId Position id
+     * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
+     * @return amount0 Expected amount of token0 withdrawn
+     * @return amount1 Expected amount of token1 withdrawn
+     */
+    function _previewWithdraw(uint256 positionId, uint32 percent)
+        internal
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
+        // Calculate amounts from decreasing liquidity
+        (uint256 liq0, uint256 liq1) = _previewDecreaseLiquidity(positionId, percent);
+        (uint128 owed0, uint128 owed1) = _getTokensOwed(positionId);
+
+        // Note: This formula differs from the one in _withdraw because, in reality, all tokens from decreaseLiquidity
+        // would accumulate in tokensOwed and then be collected. In the preview, this does not occur and tokensOwed
+        // only reflects the current pending fees, not including the simulated decrease.
+        amount0 = liq0 + uint256(owed0) * percent / PRECISION;
+        amount1 = liq1 + uint256(owed1) * percent / PRECISION;
+    }
+
+    /**
+     * @notice Preview swap without executing
+     * @param zeroForOne true for token0->token1 swap, false for token1->token0
+     * @param amount Exact input amount
+     * @param poolInfo Pool metadata (addresses and fee)
+     * @return out Expected output amount received
+     */
+    function _previewSwap(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo)
+        internal
+        view
+        returns (uint256 out)
+    {
+        if (amount == 0) return 0;
+        uint256 sqrtPriceX96 = getCurrentSqrtPriceX96(poolInfo.pool);
+
+        if (zeroForOne) {
+            // token0 -> token1: multiply by price
+            out = _getAmount0In1(sqrtPriceX96, amount);
+        } else {
+            // token1 -> token0: divide by price
+            out = _getAmount1In0(sqrtPriceX96, amount);
+        }
+    }
+
     /**
      * @notice Retrieves all position data from Uniswap position manager
      * @dev Fetches complete position struct and maps to internal data structure
@@ -743,6 +1132,14 @@ contract LPManager is IUniswapV3SwapCallback {
         );
     }
 
+    function _getAmount1In0(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
+        return FullMath.mulDiv(amount1, 2 ** 192, currentPrice * currentPrice);
+    }
+
+    function _getAmount0In1(uint256 currentPrice, uint256 amount0) internal pure returns (uint256 amount0In1) {
+        return FullMath.mulDiv(amount0, currentPrice * currentPrice, 2 ** 192);
+    }
+
     /**
      * @notice Rebalances input amounts towards the optimal proportion for the given price range
      * @dev Computes desired amounts via _getAmountsInBothTokens. If one side has an excess over
@@ -760,11 +1157,11 @@ contract LPManager is IUniswapV3SwapCallback {
     {
         Prices memory prices = _currentLowerUpper(ctx);
         // Compute desired amounts for target liquidity under current price and bounds
-        uint256 amount1In0 = FullMath.mulDiv(amount1, 2 ** 192, uint256(prices.current) * uint256(prices.current));
+        uint256 amount1In0 = _getAmount1In0(uint256(prices.current), amount1);
         (uint256 want0, uint256 want1) =
             _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
 
-        want1 = FullMath.mulDiv(want1, uint256(prices.current) * uint256(prices.current), 2 ** 192);
+        want1 = _getAmount0In1(uint256(prices.current), want1);
         if (amount0 > want0) {
             uint160 limit = _priceLimitForExcess(true, prices);
 

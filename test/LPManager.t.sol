@@ -37,6 +37,12 @@ abstract contract LPManagerTest is Test, DeployUtils {
         address from;
     }
 
+    struct PreviewInfo {
+        uint128 liquidity;
+        uint256 amount0;
+        uint256 amount1;
+    }
+
     InteractionInfo public interactionInfo;
 
     function setUp() public virtual {
@@ -172,6 +178,11 @@ abstract contract LPManagerTest is Test, DeployUtils {
         _assertZeroBalances
     {
         vm.startPrank(interactionInfo.from);
+        PreviewInfo memory previewCreatePosition;
+        (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) = lpManager
+            .previewCreatePosition(
+            address(interactionInfo.pool), amountIn0_, amountIn1_, interactionInfo.tickLower, interactionInfo.tickUpper
+        );
         uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         uint256 fee1 = protocolFeeCollector.calculateProtocolFee(amountIn1_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         vm.expectEmit(false, false, false, false, address(lpManager));
@@ -197,6 +208,9 @@ abstract contract LPManagerTest is Test, DeployUtils {
         console.log("balance of token0", interactionInfo.token0.balanceOf(interactionInfo.from));
         console.log("balance of token1", interactionInfo.token1.balanceOf(interactionInfo.from));
 
+        vm.assertApproxEqAbs(previewCreatePosition.liquidity, liquidity, liquidity / 100);
+        vm.assertApproxEqAbs(previewCreatePosition.amount0, amount0, amount0 / 100);
+        vm.assertApproxEqAbs(previewCreatePosition.amount1, amount1, amount1 / 100);
         vm.assertEq(positionManager.ownerOf(positionId), recipient_);
         vm.assertGt(liquidity, 0);
         vm.assertLt(
@@ -217,9 +231,16 @@ abstract contract LPManagerTest is Test, DeployUtils {
         _assertZeroBalances
     {
         vm.startPrank(interactionInfo.from);
+        PreviewInfo memory previewIncreaseLiquidity;
+        (previewIncreaseLiquidity.liquidity, previewIncreaseLiquidity.amount0, previewIncreaseLiquidity.amount1) =
+            lpManager.previewIncreaseLiquidity(interactionInfo.positionId, amountIn0_, amountIn1_);
         vm.expectEmit(true, false, false, false, address(lpManager));
         emit LPManager.LiquidityIncreased(interactionInfo.positionId, 0, 0);
-        lpManager.increaseLiquidity(interactionInfo.positionId, amountIn0_, amountIn1_, minLiquidity_);
+        (uint128 liquidity_, uint256 amount0_, uint256 amount1_) =
+            lpManager.increaseLiquidity(interactionInfo.positionId, amountIn0_, amountIn1_, minLiquidity_);
+        vm.assertApproxEqAbs(previewIncreaseLiquidity.liquidity, liquidity_, liquidity_ / 100);
+        vm.assertApproxEqAbs(previewIncreaseLiquidity.amount0, amount0_, amount0_ / 100);
+        vm.assertApproxEqAbs(previewIncreaseLiquidity.amount1, amount1_, amount1_ / 100);
         vm.stopPrank();
     }
 
@@ -238,10 +259,16 @@ abstract contract LPManagerTest is Test, DeployUtils {
         vm.stopPrank();
 
         vm.startPrank(interactionInfo.from);
+        PreviewInfo memory previewClaimFees;
         if (transferIn == LPManager.TransferInfoInToken.BOTH) {
+            (previewClaimFees.amount0, previewClaimFees.amount1) =
+                lpManager.previewClaimFees(interactionInfo.positionId);
             vm.expectEmit(true, false, false, false, address(lpManager));
             emit LPManager.ClaimedFees(interactionInfo.positionId, 0, 0);
-            lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, minAmountOut0_, minAmountOut1_);
+            (uint256 amount0_, uint256 amount1_) =
+                lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, minAmountOut0_, minAmountOut1_);
+            vm.assertApproxEqAbs(previewClaimFees.amount0, amount0_, amount0_ / 100);
+            vm.assertApproxEqAbs(previewClaimFees.amount1, amount1_, amount1_ / 100);
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
@@ -252,9 +279,12 @@ abstract contract LPManagerTest is Test, DeployUtils {
                 tokenOut_ = interactionInfo.token1;
                 minAmountOut_ = minAmountOut1_;
             }
+            previewClaimFees.amount1 = lpManager.previewClaimFees(interactionInfo.positionId, address(tokenOut_));
             vm.expectEmit(true, false, false, false, address(lpManager));
             emit LPManager.ClaimedFeesInToken(interactionInfo.positionId, address(tokenOut_), 0);
-            lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, address(tokenOut_), minAmountOut_);
+            (uint256 amountOut_) =
+                lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, address(tokenOut_), minAmountOut_);
+            vm.assertApproxEqAbs(previewClaimFees.amount1, amountOut_, amountOut_ / 100);
         }
         vm.stopPrank();
     }
@@ -267,9 +297,15 @@ abstract contract LPManagerTest is Test, DeployUtils {
         vm.stopPrank();
 
         vm.startPrank(interactionInfo.from);
+        PreviewInfo memory previewCompoundFees;
+        (previewCompoundFees.liquidity, previewCompoundFees.amount0, previewCompoundFees.amount1) =
+            lpManager.previewCompoundFees(interactionInfo.positionId);
         vm.expectEmit(true, false, false, false, address(lpManager));
         emit LPManager.CompoundedFees(interactionInfo.positionId, 0, 0);
-        lpManager.compoundFees(interactionInfo.positionId, 0);
+        (uint256 liquidity_, uint256 amount0_, uint256 amount1_) = lpManager.compoundFees(interactionInfo.positionId, 0);
+        vm.assertApproxEqAbs(previewCompoundFees.liquidity, liquidity_, liquidity_ / 100);
+        vm.assertApproxEqAbs(previewCompoundFees.amount0, amount0_, amount0_ / 100);
+        vm.assertApproxEqAbs(previewCompoundFees.amount1, amount1_, amount1_ / 100);
         vm.stopPrank();
     }
 
@@ -283,13 +319,19 @@ abstract contract LPManagerTest is Test, DeployUtils {
         vm.stopPrank();
 
         vm.startPrank(interactionInfo.from);
+        PreviewInfo memory previewMoveRange;
+        (previewMoveRange.liquidity, previewMoveRange.amount0, previewMoveRange.amount1) =
+            lpManager.previewMoveRange(interactionInfo.positionId, interactionInfo.tickLower, interactionInfo.tickUpper);
         LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         vm.expectEmit(false, true, false, false, address(lpManager));
         emit LPManager.RangeMoved(0, interactionInfo.positionId, 0, 0, 0, 0);
-        (uint256 newPositionId_,, uint256 amount0_, uint256 amount1_) = lpManager.moveRange(
+        (uint256 newPositionId_, uint128 liquidity_, uint256 amount0_, uint256 amount1_) = lpManager.moveRange(
             interactionInfo.positionId, interactionInfo.from, interactionInfo.tickLower, interactionInfo.tickUpper, 0
         );
         vm.stopPrank();
+        vm.assertApproxEqAbs(previewMoveRange.liquidity, liquidity_, liquidity_ / 100);
+        vm.assertApproxEqAbs(previewMoveRange.amount0, amount0_, amount0_ / 100);
+        vm.assertApproxEqAbs(previewMoveRange.amount1, amount1_, amount1_ / 100);
         vm.assertEq(positionManager.ownerOf(newPositionId_), interactionInfo.from);
         interactionInfo.positionId = newPositionId_;
         LPManager.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
@@ -312,11 +354,16 @@ abstract contract LPManagerTest is Test, DeployUtils {
         vm.stopPrank();
 
         vm.startPrank(interactionInfo.from);
+        PreviewInfo memory previewWithdraw;
         LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         if (transferIn == LPManager.TransferInfoInToken.BOTH) {
-            lpManager.withdraw(
+            (previewWithdraw.amount0, previewWithdraw.amount1) =
+                lpManager.previewWithdraw(interactionInfo.positionId, percent_);
+            (uint256 amount0_, uint256 amount1_) = lpManager.withdraw(
                 interactionInfo.positionId, percent_, interactionInfo.from, minAmountOut0_, minAmountOut1_
             );
+            vm.assertApproxEqAbs(previewWithdraw.amount0, amount0_, amount0_ / 100);
+            vm.assertApproxEqAbs(previewWithdraw.amount1, amount1_, amount1_ / 100);
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
@@ -327,9 +374,12 @@ abstract contract LPManagerTest is Test, DeployUtils {
                 tokenOut_ = interactionInfo.token1;
                 minAmountOut_ = minAmountOut1_;
             }
-            lpManager.withdraw(
+            previewWithdraw.amount1 =
+                lpManager.previewWithdraw(interactionInfo.positionId, percent_, address(tokenOut_));
+            uint256 amountOut_ = lpManager.withdraw(
                 interactionInfo.positionId, percent_, interactionInfo.from, address(tokenOut_), minAmountOut_
             );
+            vm.assertApproxEqAbs(previewWithdraw.amount1, amountOut_, amountOut_ / 100);
         }
         vm.stopPrank();
         LPManager.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
