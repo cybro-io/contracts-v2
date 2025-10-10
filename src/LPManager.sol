@@ -897,10 +897,8 @@ contract LPManager is IUniswapV3SwapCallback {
         uint256 sqrtPriceX96 = getCurrentSqrtPriceX96(poolInfo.pool);
 
         if (zeroForOne) {
-            // token0 -> token1: multiply by price
             out = _getAmount0In1(sqrtPriceX96, amount);
         } else {
-            // token1 -> token0: divide by price
             out = _getAmount1In0(sqrtPriceX96, amount);
         }
     }
