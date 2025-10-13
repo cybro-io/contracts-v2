@@ -297,9 +297,6 @@ contract LPManager is IUniswapV3SwapCallback {
         uint256 amount1AfterFee =
             _previewCollectProtocolFee(ctx.poolInfo.token1, amountIn1, IProtocolFeeCollector.FeeType.LIQUIDITY);
 
-        // Calculate optimal amounts
-        (amount0AfterFee, amount1AfterFee) = _previewToOptimalRatio(ctx, amount0AfterFee, amount1AfterFee);
-
         // Calculate liquidity and amounts used
         (liquidity, amount0Used, amount1Used) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
     }
@@ -363,9 +360,6 @@ contract LPManager is IUniswapV3SwapCallback {
         uint256 amount1AfterFee =
             _previewCollectProtocolFee(ctx.poolInfo.token1, amountIn1, IProtocolFeeCollector.FeeType.DEPOSIT);
 
-        // Calculate optimal amounts
-        (amount0AfterFee, amount1AfterFee) = _previewToOptimalRatio(ctx, amount0AfterFee, amount1AfterFee);
-
         // Calculate liquidity increase
         (liquidity, added0, added1) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
     }
@@ -390,9 +384,6 @@ contract LPManager is IUniswapV3SwapCallback {
             _previewCollectProtocolFee(ctx.poolInfo.token0, fees0, IProtocolFeeCollector.FeeType.FEES);
         uint256 amount1AfterFee =
             _previewCollectProtocolFee(ctx.poolInfo.token1, fees1, IProtocolFeeCollector.FeeType.FEES);
-
-        // Calculate optimal amounts
-        (amount0AfterFee, amount1AfterFee) = _previewToOptimalRatio(ctx, amount0AfterFee, amount1AfterFee);
 
         // Calculate liquidity increase
         (liquidity, added0, added1) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
@@ -433,9 +424,6 @@ contract LPManager is IUniswapV3SwapCallback {
         // Update context with new range
         ctx.tickLower = newLower;
         ctx.tickUpper = newUpper;
-
-        // Calculate optimal amounts for new position
-        (totalAmount0, totalAmount1) = _previewToOptimalRatio(ctx, totalAmount0, totalAmount1);
 
         // Calculate new position
         (liquidity, amount0, amount1) = _previewMintPosition(ctx, totalAmount0, totalAmount1);
@@ -655,8 +643,7 @@ contract LPManager is IUniswapV3SwapCallback {
         returns (uint256 newPositionId, uint128 liquidity, uint256 amount0, uint256 amount1)
     {
         PositionContext memory ctx = _getPositionContext(positionId);
-        _decreaseLiquidity(positionId, PRECISION);
-        (uint256 amount0Collected, uint256 amount1Collected) = _collect(positionId);
+        (uint256 amount0Collected, uint256 amount1Collected) = _withdraw(positionId, PRECISION);
         ctx.tickLower = newLower;
         ctx.tickUpper = newUpper;
         // just compound all fees into new position
@@ -783,32 +770,6 @@ contract LPManager is IUniswapV3SwapCallback {
     }
 
     /**
-     * @notice Preview optimal ratio calculation without executing swaps
-     * @param ctx Position context
-     * @param amount0 Current token0 amount available
-     * @param amount1 Current token1 amount available
-     * @return amount0 Rebalanced token0 amount
-     * @return amount1 Rebalanced token1 amount
-     */
-    function _previewToOptimalRatio(PositionContext memory ctx, uint256 amount0, uint256 amount1)
-        internal
-        view
-        returns (uint256, uint256)
-    {
-        Prices memory prices = _currentLowerUpper(ctx);
-        // Compute desired amounts for target liquidity under current price and bounds
-        (uint256 want0, uint256 want1) = _getAmountsInBothTokens(
-            amount0 + _getAmount1In0(uint256(prices.current), amount1), prices.current, prices.lower, prices.upper
-        );
-
-        want1 = _getAmount0In1(uint256(prices.current), want1);
-
-        // For preview, we don't perform actual swaps, just return the optimal amounts
-        // In real execution, swaps would be performed to rebalance
-        return (want0, want1);
-    }
-
-    /**
      * @notice Preview minting a new position without executing
      * @param ctx Position context
      * @param amount0 Amount of token0
@@ -824,6 +785,12 @@ contract LPManager is IUniswapV3SwapCallback {
     {
         // Get current price and tick boundaries using existing method
         Prices memory prices = _currentLowerUpper(ctx);
+
+        (amount0, amount1) = _getAmountsInBothTokens(
+            amount0 + _oneToZero(uint256(prices.current), amount1), prices.current, prices.lower, prices.upper
+        );
+
+        amount1 = _zeroToOne(uint256(prices.current), amount1);
 
         // Calculate liquidity using LiquidityAmounts library
         liquidity =
@@ -897,9 +864,9 @@ contract LPManager is IUniswapV3SwapCallback {
         uint256 sqrtPriceX96 = getCurrentSqrtPriceX96(poolInfo.pool);
 
         if (zeroForOne) {
-            out = _getAmount0In1(sqrtPriceX96, amount);
+            out = _zeroToOne(sqrtPriceX96, amount);
         } else {
-            out = _getAmount1In0(sqrtPriceX96, amount);
+            out = _oneToZero(sqrtPriceX96, amount);
         }
     }
 
@@ -1130,11 +1097,11 @@ contract LPManager is IUniswapV3SwapCallback {
         );
     }
 
-    function _getAmount1In0(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
+    function _oneToZero(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
         return FullMath.mulDiv(amount1, 2 ** 192, currentPrice * currentPrice);
     }
 
-    function _getAmount0In1(uint256 currentPrice, uint256 amount0) internal pure returns (uint256 amount0In1) {
+    function _zeroToOne(uint256 currentPrice, uint256 amount0) internal pure returns (uint256 amount0In1) {
         return FullMath.mulDiv(amount0, currentPrice * currentPrice, 2 ** 192);
     }
 
@@ -1155,11 +1122,11 @@ contract LPManager is IUniswapV3SwapCallback {
     {
         Prices memory prices = _currentLowerUpper(ctx);
         // Compute desired amounts for target liquidity under current price and bounds
-        uint256 amount1In0 = _getAmount1In0(uint256(prices.current), amount1);
+        uint256 amount1In0 = _oneToZero(uint256(prices.current), amount1);
         (uint256 want0, uint256 want1) =
             _getAmountsInBothTokens(amount0 + amount1In0, prices.current, prices.lower, prices.upper);
 
-        want1 = _getAmount0In1(uint256(prices.current), want1);
+        want1 = _zeroToOne(uint256(prices.current), want1);
         if (amount0 > want0) {
             uint160 limit = _priceLimitForExcess(true, prices);
 
