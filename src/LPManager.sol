@@ -292,10 +292,8 @@ contract LPManager is IUniswapV3SwapCallback {
         PositionContext memory ctx = PositionContext({poolInfo: poolInfo, tickLower: tickLower, tickUpper: tickUpper});
 
         // Apply protocol fee
-        uint256 amount0AfterFee =
-            _previewCollectProtocolFee(ctx.poolInfo.token0, amountIn0, IProtocolFeeCollector.FeeType.LIQUIDITY);
-        uint256 amount1AfterFee =
-            _previewCollectProtocolFee(ctx.poolInfo.token1, amountIn1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        uint256 amount0AfterFee = _previewCollectProtocolFee(amountIn0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        uint256 amount1AfterFee = _previewCollectProtocolFee(amountIn1, IProtocolFeeCollector.FeeType.LIQUIDITY);
 
         // Calculate liquidity and amounts used
         (liquidity, amount0Used, amount1Used) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
@@ -311,8 +309,8 @@ contract LPManager is IUniswapV3SwapCallback {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
 
-        amount0 = _previewCollectProtocolFee(poolInfo.token0, fees0, IProtocolFeeCollector.FeeType.FEES);
-        amount1 = _previewCollectProtocolFee(poolInfo.token1, fees1, IProtocolFeeCollector.FeeType.FEES);
+        amount0 = _previewCollectProtocolFee(fees0, IProtocolFeeCollector.FeeType.FEES);
+        amount1 = _previewCollectProtocolFee(fees1, IProtocolFeeCollector.FeeType.FEES);
     }
 
     /**
@@ -330,11 +328,11 @@ contract LPManager is IUniswapV3SwapCallback {
         if (tokenOut == poolInfo.token0) {
             uint256 swappedAmount = _previewSwap(false, fees1, poolInfo);
             uint256 totalAmount = fees0 + swappedAmount;
-            amountOut = _previewCollectProtocolFee(poolInfo.token0, totalAmount, IProtocolFeeCollector.FeeType.FEES);
+            amountOut = _previewCollectProtocolFee(totalAmount, IProtocolFeeCollector.FeeType.FEES);
         } else {
             uint256 swappedAmount = _previewSwap(true, fees0, poolInfo);
             uint256 totalAmount = fees1 + swappedAmount;
-            amountOut = _previewCollectProtocolFee(poolInfo.token1, totalAmount, IProtocolFeeCollector.FeeType.FEES);
+            amountOut = _previewCollectProtocolFee(totalAmount, IProtocolFeeCollector.FeeType.FEES);
         }
     }
 
@@ -355,10 +353,8 @@ contract LPManager is IUniswapV3SwapCallback {
         PositionContext memory ctx = _getPositionContext(positionId);
 
         // Apply protocol fee
-        uint256 amount0AfterFee =
-            _previewCollectProtocolFee(ctx.poolInfo.token0, amountIn0, IProtocolFeeCollector.FeeType.DEPOSIT);
-        uint256 amount1AfterFee =
-            _previewCollectProtocolFee(ctx.poolInfo.token1, amountIn1, IProtocolFeeCollector.FeeType.DEPOSIT);
+        uint256 amount0AfterFee = _previewCollectProtocolFee(amountIn0, IProtocolFeeCollector.FeeType.DEPOSIT);
+        uint256 amount1AfterFee = _previewCollectProtocolFee(amountIn1, IProtocolFeeCollector.FeeType.DEPOSIT);
 
         // Calculate liquidity increase
         (liquidity, added0, added1) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
@@ -380,10 +376,8 @@ contract LPManager is IUniswapV3SwapCallback {
         (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
 
         // Apply protocol fee
-        uint256 amount0AfterFee =
-            _previewCollectProtocolFee(ctx.poolInfo.token0, fees0, IProtocolFeeCollector.FeeType.FEES);
-        uint256 amount1AfterFee =
-            _previewCollectProtocolFee(ctx.poolInfo.token1, fees1, IProtocolFeeCollector.FeeType.FEES);
+        uint256 amount0AfterFee = _previewCollectProtocolFee(fees0, IProtocolFeeCollector.FeeType.FEES);
+        uint256 amount1AfterFee = _previewCollectProtocolFee(fees1, IProtocolFeeCollector.FeeType.FEES);
 
         // Calculate liquidity increase
         (liquidity, added0, added1) = _previewMintPosition(ctx, amount0AfterFee, amount1AfterFee);
@@ -409,17 +403,15 @@ contract LPManager is IUniswapV3SwapCallback {
         (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
 
         // Calculate amounts from decreasing liquidity
-        (uint256 amount0FromLiquidity, uint256 amount1FromLiquidity) = _previewDecreaseLiquidity(positionId, PRECISION);
+        (uint256 amount0FromLiquidity, uint256 amount1FromLiquidity) = _previewWithdraw(positionId, PRECISION);
 
         // Total amounts available
         uint256 totalAmount0 = amount0FromLiquidity + fees0;
         uint256 totalAmount1 = amount1FromLiquidity + fees1;
 
         // Apply protocol fee
-        totalAmount0 =
-            _previewCollectProtocolFee(ctx.poolInfo.token0, totalAmount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
-        totalAmount1 =
-            _previewCollectProtocolFee(ctx.poolInfo.token1, totalAmount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        totalAmount0 = _previewCollectProtocolFee(totalAmount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        totalAmount1 = _previewCollectProtocolFee(totalAmount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
 
         // Update context with new range
         ctx.tickLower = newLower;
@@ -444,8 +436,8 @@ contract LPManager is IUniswapV3SwapCallback {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         (uint256 withdrawn0, uint256 withdrawn1) = _previewWithdraw(positionId, percent);
 
-        amount0 = _previewCollectProtocolFee(poolInfo.token0, withdrawn0, IProtocolFeeCollector.FeeType.LIQUIDITY);
-        amount1 = _previewCollectProtocolFee(poolInfo.token1, withdrawn1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        amount0 = _previewCollectProtocolFee(withdrawn0, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        amount1 = _previewCollectProtocolFee(withdrawn1, IProtocolFeeCollector.FeeType.LIQUIDITY);
     }
 
     /**
@@ -467,15 +459,11 @@ contract LPManager is IUniswapV3SwapCallback {
 
         if (tokenOut == poolInfo.token0) {
             amountOut = _previewCollectProtocolFee(
-                poolInfo.token0,
-                withdrawn0 + _previewSwap(false, withdrawn1, poolInfo),
-                IProtocolFeeCollector.FeeType.LIQUIDITY
+                withdrawn0 + _previewSwap(false, withdrawn1, poolInfo), IProtocolFeeCollector.FeeType.LIQUIDITY
             );
         } else {
             amountOut = _previewCollectProtocolFee(
-                poolInfo.token1,
-                withdrawn1 + _previewSwap(true, withdrawn0, poolInfo),
-                IProtocolFeeCollector.FeeType.LIQUIDITY
+                withdrawn1 + _previewSwap(true, withdrawn0, poolInfo), IProtocolFeeCollector.FeeType.LIQUIDITY
             );
         }
     }
@@ -715,19 +703,6 @@ contract LPManager is IUniswapV3SwapCallback {
         emit WithdrawnSingleToken(positionId, tokenOut, amountOut, amount0, amount1);
     }
 
-    /* ============ INTERNAL FUNCTIONS ============ */
-
-    /**
-     * @notice Resolves the Uniswap V3 pool address by token order and fee tier
-     * @param token0 Pool token0 address
-     * @param token1 Pool token1 address
-     * @param fee Fee tier (e.g. 500, 3000, 10000)
-     * @return pool Pool address
-     */
-    function _getPool(address token0, address token1, uint24 fee) private view returns (address) {
-        return factory.getPool(token0, token1, fee);
-    }
-
     /* ============ INTERNAL PREVIEW FUNCTIONS ============ */
 
     /**
@@ -736,7 +711,7 @@ contract LPManager is IUniswapV3SwapCallback {
      * @param feeType Type of fee to collect (LIQUIDITY, DEPOSIT, FEES)
      * @return amount Amount of tokens after collecting fee
      */
-    function _previewCollectProtocolFee(address, /* token */ uint256 amount, IProtocolFeeCollector.FeeType feeType)
+    function _previewCollectProtocolFee(uint256 amount, IProtocolFeeCollector.FeeType feeType)
         internal
         view
         returns (uint256)
@@ -802,30 +777,6 @@ contract LPManager is IUniswapV3SwapCallback {
     }
 
     /**
-     * @notice Preview decreasing liquidity without executing
-     * @param positionId Position id
-     * @param percent Basis points of liquidity to decrease (1e4 = 100%)
-     * @return amount0 Expected amount of token0 received
-     * @return amount1 Expected amount of token1 received
-     */
-    function _previewDecreaseLiquidity(uint256 positionId, uint32 percent)
-        internal
-        view
-        returns (uint256 amount0, uint256 amount1)
-    {
-        uint128 totalLiquidity = _getTokenLiquidity(positionId);
-        uint128 liquidityToDecrease = totalLiquidity * percent / PRECISION;
-
-        // Get position context and prices using existing methods
-        PositionContext memory ctx = _getPositionContext(positionId);
-        Prices memory prices = _currentLowerUpper(ctx);
-
-        // Calculate amounts based on current price and position range using LiquidityAmounts
-        (amount0, amount1) =
-            LiquidityAmounts.getAmountsForLiquidity(prices.current, prices.lower, prices.upper, liquidityToDecrease);
-    }
-
-    /**
      * @notice Preview withdrawing without executing
      * @param positionId Position id
      * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
@@ -837,8 +788,15 @@ contract LPManager is IUniswapV3SwapCallback {
         view
         returns (uint256 amount0, uint256 amount1)
     {
+        // Get prices
+        Prices memory prices = _currentLowerUpper(_getPositionContext(positionId));
+
         // Calculate amounts from decreasing liquidity
-        (uint256 liq0, uint256 liq1) = _previewDecreaseLiquidity(positionId, percent);
+        uint128 liquidityToDecrease = _getTokenLiquidity(positionId) * percent / PRECISION;
+
+        // Calculate amounts based on current price and position range using LiquidityAmounts
+        (uint256 liq0, uint256 liq1) =
+            LiquidityAmounts.getAmountsForLiquidity(prices.current, prices.lower, prices.upper, liquidityToDecrease);
         (uint128 owed0, uint128 owed1) = _getTokensOwed(positionId);
 
         // Note: This formula differs from the one in _withdraw because, in reality, all tokens from decreaseLiquidity
@@ -868,6 +826,19 @@ contract LPManager is IUniswapV3SwapCallback {
         } else {
             out = _oneToZero(sqrtPriceX96, amount);
         }
+    }
+
+    /* ============ INTERNAL FUNCTIONS ============ */
+
+    /**
+     * @notice Resolves the Uniswap V3 pool address by token order and fee tier
+     * @param token0 Pool token0 address
+     * @param token1 Pool token1 address
+     * @param fee Fee tier (e.g. 500, 3000, 10000)
+     * @return pool Pool address
+     */
+    function _getPool(address token0, address token1, uint24 fee) private view returns (address) {
+        return factory.getPool(token0, token1, fee);
     }
 
     /**
