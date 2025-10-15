@@ -399,19 +399,12 @@ contract LPManager is IUniswapV3SwapCallback {
     {
         PositionContext memory ctx = _getPositionContext(positionId);
 
-        // Get current liquidity and fees
-        (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
-
         // Calculate amounts from decreasing liquidity
         (uint256 amount0FromLiquidity, uint256 amount1FromLiquidity) = _previewWithdraw(positionId, PRECISION);
 
-        // Total amounts available
-        uint256 totalAmount0 = amount0FromLiquidity + fees0;
-        uint256 totalAmount1 = amount1FromLiquidity + fees1;
-
         // Apply protocol fee
-        totalAmount0 = _previewCollectProtocolFee(totalAmount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
-        totalAmount1 = _previewCollectProtocolFee(totalAmount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        uint256 totalAmount0 = _previewCollectProtocolFee(amount0FromLiquidity, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        uint256 totalAmount1 = _previewCollectProtocolFee(amount1FromLiquidity, IProtocolFeeCollector.FeeType.LIQUIDITY);
 
         // Update context with new range
         ctx.tickLower = newLower;
@@ -797,13 +790,14 @@ contract LPManager is IUniswapV3SwapCallback {
         // Calculate amounts based on current price and position range using LiquidityAmounts
         (uint256 liq0, uint256 liq1) =
             LiquidityAmounts.getAmountsForLiquidity(prices.current, prices.lower, prices.upper, liquidityToDecrease);
-        (uint128 owed0, uint128 owed1) = _getTokensOwed(positionId);
+        // Get current liquidity and fees
+        (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
 
         // Note: This formula differs from the one in _withdraw because, in reality, all tokens from decreaseLiquidity
         // would accumulate in tokensOwed and then be collected. In the preview, this does not occur and tokensOwed
         // only reflects the current pending fees, not including the simulated decrease.
-        amount0 = liq0 + uint256(owed0) * percent / PRECISION;
-        amount1 = liq1 + uint256(owed1) * percent / PRECISION;
+        amount0 = liq0 + uint256(fees0) * percent / PRECISION;
+        amount1 = liq1 + uint256(fees1) * percent / PRECISION;
     }
 
     /**
