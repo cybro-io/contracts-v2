@@ -306,7 +306,6 @@ contract LPManager is IUniswapV3SwapCallback {
      * @return amount1 Expected amount of token1 claimed (after protocol fee)
      */
     function previewClaimFees(uint256 positionId) external view returns (uint256 amount0, uint256 amount1) {
-        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
 
         amount0 = _previewCollectProtocolFee(fees0, IProtocolFeeCollector.FeeType.FEES);
@@ -426,7 +425,6 @@ contract LPManager is IUniswapV3SwapCallback {
         view
         returns (uint256 amount0, uint256 amount1)
     {
-        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         (uint256 withdrawn0, uint256 withdrawn1) = _previewWithdraw(positionId, percent);
 
         amount0 = _previewCollectProtocolFee(withdrawn0, IProtocolFeeCollector.FeeType.LIQUIDITY);
