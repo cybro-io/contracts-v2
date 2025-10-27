@@ -35,6 +35,8 @@ import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/Liquid
 contract LPManager is IUniswapV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
 
+    /* ============ TYPES ============ */
+
     enum TransferInfoInToken {
         BOTH,
         TOKEN0,
@@ -119,7 +121,7 @@ contract LPManager is IUniswapV3SwapCallback {
         uint160 upper;
     }
 
-    /*=========== Events ============*/
+    /* ============ EVENTS ============ */
 
     /// @notice Emitted when a position is created
     /// @param positionId Newly minted position NFT id
@@ -202,6 +204,8 @@ contract LPManager is IUniswapV3SwapCallback {
         factory = IUniswapV3Factory(_positionManager.factory());
     }
 
+    /* ============ MODIFIERS ============ */
+
     /// @notice Restricts a call to the owner of `positionId` in the Uniswap position manager
     /// @dev Reads the owner from `positionManager.ownerOf(positionId)` and reverts otherwise
     modifier onlyPositionOwner(uint256 positionId) {
@@ -218,7 +222,7 @@ contract LPManager is IUniswapV3SwapCallback {
      */
     function getPosition(uint256 positionId) external view returns (Position memory position) {
         RawPositionData memory rawData = _getRawPositionData(positionId);
-        address poolAddress = _getPool(rawData.token0, rawData.token1, rawData.fee);
+        address poolAddress = factory.getPool(rawData.token0, rawData.token1, rawData.fee);
         (uint256 unclaimedFee0, uint256 unclaimedFee1) = _calculateUnclaimedFees(
             poolAddress,
             rawData.tickLower,
@@ -251,7 +255,6 @@ contract LPManager is IUniswapV3SwapCallback {
      */
     function getCurrentSqrtPriceX96(address pool) public view returns (uint256 sqrtPriceX96) {
         (sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        return uint256(sqrtPriceX96);
     }
 
     /**
@@ -514,6 +517,7 @@ contract LPManager is IUniswapV3SwapCallback {
      */
     function claimFees(uint256 positionId, address recipient, uint256 minAmountOut0, uint256 minAmountOut1)
         external
+        onlyPositionOwner(positionId)
         returns (uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = _claimFees(positionId, recipient, TransferInfoInToken.BOTH);
@@ -534,9 +538,10 @@ contract LPManager is IUniswapV3SwapCallback {
      */
     function claimFees(uint256 positionId, address recipient, address tokenOut, uint256 minAmountOut)
         external
+        onlyPositionOwner(positionId)
         returns (uint256 amountOut)
     {
-        (PoolInfo memory poolInfo) = _getPoolInfoById(positionId);
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
 
         (uint256 amount0, uint256 amount1) = _claimFees(
@@ -647,19 +652,11 @@ contract LPManager is IUniswapV3SwapCallback {
         address recipient,
         uint256 minAmountOut0,
         uint256 minAmountOut1
-    ) external returns (uint256 amount0, uint256 amount1) {
+    ) external onlyPositionOwner(positionId) returns (uint256 amount0, uint256 amount1) {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
-        (amount0, amount1) = _withdraw(positionId, percent);
-        amount0 = _collectProtocolFee(poolInfo.token0, amount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
-        amount1 = _collectProtocolFee(poolInfo.token1, amount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
+        (amount0, amount1) = _withdrawWithCollect(positionId, percent, recipient, TransferInfoInToken.BOTH);
         require(amount0 >= minAmountOut0, Amount0LessThanMin());
         require(amount1 >= minAmountOut1, Amount1LessThanMin());
-        if (amount0 > 0) {
-            IERC20Metadata(poolInfo.token0).safeTransfer(recipient, amount0);
-        }
-        if (amount1 > 0) {
-            IERC20Metadata(poolInfo.token1).safeTransfer(recipient, amount1);
-        }
         emit WithdrawnBothTokens(positionId, poolInfo.token0, poolInfo.token1, amount0, amount1);
     }
 
@@ -675,22 +672,19 @@ contract LPManager is IUniswapV3SwapCallback {
      */
     function withdraw(uint256 positionId, uint32 percent, address recipient, address tokenOut, uint256 minAmountOut)
         external
+        onlyPositionOwner(positionId)
         returns (uint256 amountOut)
     {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
-        (uint256 amount0, uint256 amount1) = _withdraw(positionId, percent);
-        if (tokenOut == poolInfo.token0) {
-            amountOut = _collectProtocolFee(
-                poolInfo.token0, amount0 + _swap(false, amount1, poolInfo), IProtocolFeeCollector.FeeType.LIQUIDITY
-            );
-        } else {
-            amountOut = _collectProtocolFee(
-                poolInfo.token1, amount1 + _swap(true, amount0, poolInfo), IProtocolFeeCollector.FeeType.LIQUIDITY
-            );
-        }
+        (uint256 amount0, uint256 amount1) = _withdrawWithCollect(
+            positionId,
+            percent,
+            recipient,
+            tokenOut == poolInfo.token0 ? TransferInfoInToken.TOKEN0 : TransferInfoInToken.TOKEN1
+        );
+        amountOut = amount0 == 0 ? amount1 : amount0;
         require(amountOut >= minAmountOut, AmountLessThanMin());
-        IERC20Metadata(tokenOut).safeTransfer(recipient, amountOut);
         emit WithdrawnSingleToken(positionId, tokenOut, amountOut, amount0, amount1);
     }
 
@@ -720,7 +714,7 @@ contract LPManager is IUniswapV3SwapCallback {
      */
     function _previewCollect(uint256 positionId) internal view returns (uint256 amount0, uint256 amount1) {
         RawPositionData memory rawData = _getRawPositionData(positionId);
-        address poolAddress = _getPool(rawData.token0, rawData.token1, rawData.fee);
+        address poolAddress = factory.getPool(rawData.token0, rawData.token1, rawData.fee);
         (amount0, amount1) = _calculateUnclaimedFees(
             poolAddress,
             rawData.tickLower,
@@ -823,17 +817,6 @@ contract LPManager is IUniswapV3SwapCallback {
     /* ============ INTERNAL FUNCTIONS ============ */
 
     /**
-     * @notice Resolves the Uniswap V3 pool address by token order and fee tier
-     * @param token0 Pool token0 address
-     * @param token1 Pool token1 address
-     * @param fee Fee tier (e.g. 500, 3000, 10000)
-     * @return pool Pool address
-     */
-    function _getPool(address token0, address token1, uint24 fee) private view returns (address) {
-        return factory.getPool(token0, token1, fee);
-    }
-
-    /**
      * @notice Retrieves all position data from Uniswap position manager
      * @dev Fetches complete position struct and maps to internal data structure
      * @param positionId Position ID to query
@@ -841,8 +824,7 @@ contract LPManager is IUniswapV3SwapCallback {
      */
     function _getRawPositionData(uint256 positionId) internal view returns (RawPositionData memory rawPositionData) {
         (
-            ,
-            ,
+            ,,
             address token0,
             address token1,
             uint24 fee,
@@ -869,43 +851,13 @@ contract LPManager is IUniswapV3SwapCallback {
     }
 
     /**
-     * @notice Claims fees for a position
-     * @param positionId Position id
-     * @param recipient Recipient of the fees
-     * @param transferInfoInToken Transfer info in token
-     * @return amount0 Amount of token0 claimed
-     * @return amount1 Amount of token1 claimed
-     */
-    function _claimFees(uint256 positionId, address recipient, TransferInfoInToken transferInfoInToken)
-        internal
-        onlyPositionOwner(positionId)
-        returns (uint256 amount0, uint256 amount1)
-    {
-        (PoolInfo memory poolInfo) = _getPoolInfoById(positionId);
-        (amount0, amount1) = _collect(positionId);
-        amount0 = _collectProtocolFee(poolInfo.token0, amount0, IProtocolFeeCollector.FeeType.FEES);
-        amount1 = _collectProtocolFee(poolInfo.token1, amount1, IProtocolFeeCollector.FeeType.FEES);
-        if (transferInfoInToken != TransferInfoInToken.BOTH) {
-            if (transferInfoInToken == TransferInfoInToken.TOKEN0) {
-                amount0 += _swap(false, amount1, poolInfo);
-                amount1 = 0;
-            } else {
-                amount1 += _swap(true, amount0, poolInfo);
-                amount0 = 0;
-            }
-        }
-        if (amount0 > 0) IERC20Metadata(poolInfo.token0).safeTransfer(recipient, amount0);
-        if (amount1 > 0) IERC20Metadata(poolInfo.token1).safeTransfer(recipient, amount1);
-    }
-
-    /**
      * @notice Reads the pool info (addresses and fee) from a position id
      * @param positionId The Uniswap V3 position token id
      * @return poolInfo Pool metadata for the underlying pool
      */
     function _getPoolInfoById(uint256 positionId) internal view returns (PoolInfo memory poolInfo) {
         (,, address token0, address token1, uint24 fee,,,,,,,) = positionManager.positions(positionId);
-        address pool = _getPool(token0, token1, fee);
+        address pool = factory.getPool(token0, token1, fee);
         poolInfo = PoolInfo({pool: pool, token0: token0, token1: token1, fee: fee});
     }
 
@@ -918,7 +870,7 @@ contract LPManager is IUniswapV3SwapCallback {
         (,, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper,,,,,) =
             positionManager.positions(positionId);
         PoolInfo memory poolInfo =
-            PoolInfo({pool: _getPool(token0, token1, fee), token0: token0, token1: token1, fee: fee});
+            PoolInfo({pool: factory.getPool(token0, token1, fee), token0: token0, token1: token1, fee: fee});
         ctx = PositionContext({poolInfo: poolInfo, tickLower: tickLower, tickUpper: tickUpper});
     }
 
@@ -990,21 +942,22 @@ contract LPManager is IUniswapV3SwapCallback {
         internal
         returns (uint256 tokenId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
     {
-        (tokenId, liquidity, amount0Used, amount1Used) = INonfungiblePositionManager(positionManager).mint(
-            INonfungiblePositionManager.MintParams({
-                token0: ctx.poolInfo.token0,
-                token1: ctx.poolInfo.token1,
-                fee: ctx.poolInfo.fee,
-                tickLower: ctx.tickLower,
-                tickUpper: ctx.tickUpper,
-                amount0Desired: amount0,
-                amount1Desired: amount1,
-                amount0Min: 0,
-                amount1Min: 0,
-                recipient: recipient,
-                deadline: block.timestamp
-            })
-        );
+        (tokenId, liquidity, amount0Used, amount1Used) = INonfungiblePositionManager(positionManager)
+            .mint(
+                INonfungiblePositionManager.MintParams({
+                    token0: ctx.poolInfo.token0,
+                    token1: ctx.poolInfo.token1,
+                    fee: ctx.poolInfo.fee,
+                    tickLower: ctx.tickLower,
+                    tickUpper: ctx.tickUpper,
+                    amount0Desired: amount0,
+                    amount1Desired: amount1,
+                    amount0Min: 0,
+                    amount1Min: 0,
+                    recipient: recipient,
+                    deadline: block.timestamp
+                })
+            );
     }
 
     function _decreaseLiquidity(uint256 positionId, uint32 percent)
@@ -1035,19 +988,12 @@ contract LPManager is IUniswapV3SwapCallback {
         // Collect earned fees from the liquidity position
         (amount0, amount1) = positionManager.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: positionId,
-                recipient: recipient,
-                amount0Max: amount0Max,
-                amount1Max: amount1Max
+                tokenId: positionId, recipient: recipient, amount0Max: amount0Max, amount1Max: amount1Max
             })
         );
     }
 
-    function _withdraw(uint256 positionId, uint32 percent)
-        internal
-        onlyPositionOwner(positionId)
-        returns (uint256 amount0, uint256 amount1)
-    {
+    function _withdraw(uint256 positionId, uint32 percent) internal returns (uint256 amount0, uint256 amount1) {
         // decrease liquidity
         (uint256 liq0, uint256 liq1) = _decreaseLiquidity(positionId, percent);
         (uint128 owed0, uint128 owed1) = _getTokensOwed(positionId);
@@ -1058,6 +1004,60 @@ contract LPManager is IUniswapV3SwapCallback {
             uint128(liq0 + (uint256(owed0) - liq0) * percent / PRECISION),
             uint128(liq1 + (uint256(owed1) - liq1) * percent / PRECISION)
         );
+    }
+
+    /**
+     * @notice Claims fees for a position
+     * @param positionId Position id
+     * @param recipient Recipient of the fees
+     * @param transferInfoInToken Transfer info in token
+     * @return amount0 Amount of token0 claimed
+     * @return amount1 Amount of token1 claimed
+     */
+    function _claimFees(uint256 positionId, address recipient, TransferInfoInToken transferInfoInToken)
+        internal
+        returns (uint256 amount0, uint256 amount1)
+    {
+        (amount0, amount1) = _collect(positionId);
+        (amount0, amount1) = _collectSwapTransfer(
+            amount0, amount1, positionId, transferInfoInToken, IProtocolFeeCollector.FeeType.FEES, recipient
+        );
+    }
+
+    function _withdrawWithCollect(
+        uint256 positionId,
+        uint32 percent,
+        address recipient,
+        TransferInfoInToken transferInfoInToken
+    ) internal returns (uint256 amount0, uint256 amount1) {
+        (amount0, amount1) = _withdraw(positionId, percent);
+        (amount0, amount1) = _collectSwapTransfer(
+            amount0, amount1, positionId, transferInfoInToken, IProtocolFeeCollector.FeeType.LIQUIDITY, recipient
+        );
+    }
+
+    function _collectSwapTransfer(
+        uint256 amount0In,
+        uint256 amount1In,
+        uint256 positionId,
+        TransferInfoInToken transferInfoInToken,
+        IProtocolFeeCollector.FeeType feeType,
+        address recipient
+    ) internal returns (uint256 amount0, uint256 amount1) {
+        PoolInfo memory poolInfo = _getPoolInfoById(positionId);
+        amount0 = _collectProtocolFee(poolInfo.token0, amount0In, feeType);
+        amount1 = _collectProtocolFee(poolInfo.token1, amount1In, feeType);
+        if (transferInfoInToken != TransferInfoInToken.BOTH) {
+            if (transferInfoInToken == TransferInfoInToken.TOKEN0) {
+                amount0 += _swap(false, amount1, poolInfo);
+                amount1 = 0;
+            } else {
+                amount1 += _swap(true, amount0, poolInfo);
+                amount0 = 0;
+            }
+        }
+        if (amount0 > 0) IERC20Metadata(poolInfo.token0).safeTransfer(recipient, amount0);
+        if (amount1 > 0) IERC20Metadata(poolInfo.token1).safeTransfer(recipient, amount1);
     }
 
     function _oneToZero(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
@@ -1204,10 +1204,12 @@ contract LPManager is IUniswapV3SwapCallback {
                 feeGrowthInside1X128 = feeGrowthGlobal1X128 - feeGrowthOutside1X128Lower - feeGrowthOutside1X128Upper;
             }
 
-            fee0 =
-                FullMath.mulDiv(uint256(feeGrowthInside0X128 - feeGrowthInside0LastX128), liquidity, FixedPoint128.Q128);
-            fee1 =
-                FullMath.mulDiv(uint256(feeGrowthInside1X128 - feeGrowthInside1LastX128), liquidity, FixedPoint128.Q128);
+            fee0 = FullMath.mulDiv(
+                uint256(feeGrowthInside0X128 - feeGrowthInside0LastX128), liquidity, FixedPoint128.Q128
+            );
+            fee1 = FullMath.mulDiv(
+                uint256(feeGrowthInside1X128 - feeGrowthInside1LastX128), liquidity, FixedPoint128.Q128
+            );
         }
     }
 
@@ -1227,8 +1229,10 @@ contract LPManager is IUniswapV3SwapCallback {
     }
 
     function _ensureAllowance(address token, uint256 amount) internal {
-        if (IERC20Metadata(token).allowance(address(this), address(positionManager)) < amount) {
-            IERC20Metadata(token).forceApprove(address(positionManager), type(uint256).max);
+        uint256 currentAllowance = IERC20Metadata(token).allowance(address(this), address(positionManager));
+        if (currentAllowance < amount) {
+            // Approve на amount, а не на max (безопаснее)
+            IERC20Metadata(token).forceApprove(address(positionManager), amount);
         }
     }
 
@@ -1282,15 +1286,16 @@ contract LPManager is IUniswapV3SwapCallback {
         if (sqrtPriceLimitX96 == 0) {
             sqrtPriceLimitX96 = zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1;
         }
-        (amount0, amount1) = IUniswapV3Pool(poolInfo.pool).swap(
-            address(this),
-            zeroForOne,
-            int256(amount),
-            sqrtPriceLimitX96,
-            zeroForOne
-                ? abi.encode(poolInfo.token0, poolInfo.token1, poolInfo.fee)
-                : abi.encode(poolInfo.token1, poolInfo.token0, poolInfo.fee)
-        );
+        (amount0, amount1) = IUniswapV3Pool(poolInfo.pool)
+            .swap(
+                address(this),
+                zeroForOne,
+                int256(amount),
+                sqrtPriceLimitX96,
+                zeroForOne
+                    ? abi.encode(poolInfo.token0, poolInfo.token1, poolInfo.fee)
+                    : abi.encode(poolInfo.token1, poolInfo.token0, poolInfo.fee)
+            );
     }
 
     /* ============ CALLBACK FUNCTIONS ============ */

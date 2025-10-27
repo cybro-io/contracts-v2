@@ -14,6 +14,7 @@ import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
+import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 
 abstract contract LPManagerTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
@@ -21,6 +22,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
     LPManager public lpManager;
     INonfungiblePositionManager public positionManager;
     ProtocolFeeCollector public protocolFeeCollector;
+    IAaveOracle public aaveOracle;
 
     Swapper swapper;
 
@@ -116,7 +118,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
         return FullMath.mulDiv(amount1, 2 ** 192, uint256(currentPrice) * uint256(currentPrice));
     }
 
-    function baseline(
+    function _intializePosition(
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
@@ -125,7 +127,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
         int24 tickUpper_,
         int24 newLower_,
         int24 newUpper_
-    ) public {
+    ) internal {
         interactionInfo = InteractionInfo({
             positionId: 0,
             token0: IERC20Metadata(pool_.token0()),
@@ -146,6 +148,19 @@ abstract contract LPManagerTest is Test, DeployUtils {
         _provideAndApproveSpecific(true, interactionInfo.token1, amountIn1_, interactionInfo.from);
         createPosition(amountIn0_, amountIn1_, user_, 1);
         console.log("POSITION CREATED", interactionInfo.positionId);
+    }
+
+    function baseline(
+        address user_,
+        uint256 amountIn0_,
+        uint256 amountIn1_,
+        IUniswapV3Pool pool_,
+        int24 tickLower_,
+        int24 tickUpper_,
+        int24 newLower_,
+        int24 newUpper_
+    ) public {
+        _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         _provideAndApproveSpecific(true, interactionInfo.token0, amountIn0_, interactionInfo.from);
         _provideAndApproveSpecific(true, interactionInfo.token1, amountIn1_, interactionInfo.from);
         increaseLiquidity(amountIn0_, amountIn1_, 1);
@@ -179,8 +194,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
     {
         vm.startPrank(interactionInfo.from);
         PreviewInfo memory previewCreatePosition;
-        (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) = lpManager
-            .previewCreatePosition(
+        (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) = lpManager.previewCreatePosition(
             address(interactionInfo.pool), amountIn0_, amountIn1_, interactionInfo.tickLower, interactionInfo.tickUpper
         );
         uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
@@ -320,8 +334,9 @@ abstract contract LPManagerTest is Test, DeployUtils {
 
         vm.startPrank(interactionInfo.from);
         PreviewInfo memory previewMoveRange;
-        (previewMoveRange.liquidity, previewMoveRange.amount0, previewMoveRange.amount1) =
-            lpManager.previewMoveRange(interactionInfo.positionId, interactionInfo.tickLower, interactionInfo.tickUpper);
+        (previewMoveRange.liquidity, previewMoveRange.amount0, previewMoveRange.amount1) = lpManager.previewMoveRange(
+            interactionInfo.positionId, interactionInfo.tickLower, interactionInfo.tickUpper
+        );
         LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         vm.expectEmit(false, true, false, false, address(lpManager));
         emit LPManager.RangeMoved(0, interactionInfo.positionId, 0, 0, 0, 0);
@@ -401,6 +416,7 @@ contract LPManagerTestBaseChain is LPManagerTest {
         vm.createSelectFork(vm.rpcUrl("base"), lastCachedBlockid_BASE);
         positionManager = positionManager_UNI_BASE;
         pool = IUniswapV3Pool(0xd0b53D9277642d899DF5C87A3966A349A798F224);
+        aaveOracle = aaveOracle_BASE;
         super.setUp();
     }
 

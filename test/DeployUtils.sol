@@ -8,13 +8,15 @@ import {Vm} from "forge-std/Vm.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
+import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 
 contract DeployUtils is StdCheats {
     using SafeERC20 for IERC20Metadata;
 
     Vm private constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
-    address public constant user = address(100);
+    uint256 internal constant userPrivateKey = 0xba111ce;
+    address public constant user = address(0xf0fbFC76B87093b84d20eA561D483b01eC10941a);
     address public constant user2 = address(101);
     address public constant user3 = address(102);
     address public constant user4 = address(103);
@@ -60,6 +62,7 @@ contract DeployUtils is StdCheats {
     IERC20Metadata cbwbtc_BASE = IERC20Metadata(address(0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf));
     IERC20Metadata susds_BASE = IERC20Metadata(address(0x5875eEE11Cf8398102FdAd704C9E96607675467a));
     IERC20Metadata wstETH_BASE = IERC20Metadata(address(0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452));
+    IAaveOracle aaveOracle_BASE = IAaveOracle(address(0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156));
 
     /* UNICHAIN */
     IERC20Metadata usdc_UNICHAIN = IERC20Metadata(address(0x078D782b760474a361dDA0AF3839290b0EF57AD6));
