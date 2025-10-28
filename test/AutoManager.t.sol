@@ -2,7 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
-import {Auto} from "../src/Auto.sol";
+import {AutoManager} from "../src/AutoManager.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
@@ -17,11 +17,12 @@ import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {LPManager} from "../src/LPManager.sol";
+import {BaseLPManager} from "../src/BaseLPManager.sol";
 
-contract AutoTest is Test, DeployUtils {
+contract AutoManagerTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
 
-    Auto public autoManager;
+    AutoManager public autoManager;
     INonfungiblePositionManager public positionManager;
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
@@ -69,7 +70,7 @@ contract AutoTest is Test, DeployUtils {
     function _deployAuto() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        autoManager = new Auto(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)), aaveOracle);
+        autoManager = new AutoManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)), aaveOracle);
         lpManager = new LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
     }
@@ -178,7 +179,7 @@ contract AutoTest is Test, DeployUtils {
         uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         uint256 fee1 = protocolFeeCollector.calculateProtocolFee(amountIn1_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         vm.expectEmit(false, false, false, false, address(lpManager));
-        emit LPManager.PositionCreated(0, 0, 0, 0, 0, 0, 0);
+        emit BaseLPManager.PositionCreated(0, 0, 0, 0, 0, 0, 0);
         (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition(
             address(interactionInfo.pool),
             amountIn0_,
@@ -218,7 +219,7 @@ contract AutoTest is Test, DeployUtils {
         vm.assertEq(interactionInfo.token1.balanceOf(address(protocolFeeCollector)), fee1);
     }
 
-    function _getSignatureClaimFees(Auto.AutoClaimRequest memory request) public view returns (bytes memory) {
+    function _getSignatureClaimFees(AutoManager.AutoClaimRequest memory request) public view returns (bytes memory) {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(AUTO_CLAIM_REQUEST_TYPEHASH, request));
         console.log("structHash");
@@ -229,7 +230,11 @@ contract AutoTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureRebalance(Auto.AutoRebalanceRequest memory request) public view returns (bytes memory) {
+    function _getSignatureRebalance(AutoManager.AutoRebalanceRequest memory request)
+        public
+        view
+        returns (bytes memory)
+    {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(AUTO_REBALANCE_REQUEST_TYPEHASH, request));
         bytes32 digest = MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
@@ -237,7 +242,7 @@ contract AutoTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureClose(Auto.AutoCloseRequest memory request) public view returns (bytes memory) {
+    function _getSignatureClose(AutoManager.AutoCloseRequest memory request) public view returns (bytes memory) {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(AUTO_CLOSE_REQUEST_TYPEHASH, request));
         bytes32 digest = MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
@@ -248,7 +253,7 @@ contract AutoTest is Test, DeployUtils {
     function _getDomainSeparator() internal view returns (bytes32) {
         bytes32 typeHash =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-        bytes32 nameHash = keccak256(bytes("LPManager"));
+        bytes32 nameHash = keccak256(bytes("AutoManager"));
         bytes32 versionHash = keccak256(bytes("1"));
 
         return keccak256(abi.encode(typeHash, nameHash, versionHash, block.chainid, address(autoManager)));
@@ -265,9 +270,10 @@ contract AutoTest is Test, DeployUtils {
         int24 newUpper_
     ) public {
         _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
-        uint160 triggerLower = TickMath.getSqrtRatioAtTick(tickLower_ + pool_.tickSpacing());
-        uint160 triggerUpper = TickMath.getSqrtRatioAtTick(tickUpper_ - pool_.tickSpacing());
-        Auto.AutoRebalanceRequest memory request = Auto.AutoRebalanceRequest({
+        (, int24 currentTick,,,,,) = pool_.slot0();
+        uint160 triggerLower = TickMath.getSqrtRatioAtTick(currentTick - 10 * pool_.tickSpacing());
+        uint160 triggerUpper = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
+        AutoManager.AutoRebalanceRequest memory request = AutoManager.AutoRebalanceRequest({
             positionId: interactionInfo.positionId, triggerLower: triggerLower, triggerUpper: triggerUpper
         });
         bool need = autoManager.needRebalance(request);
@@ -303,14 +309,14 @@ contract AutoTest is Test, DeployUtils {
         int24 newUpper_
     ) public {
         _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
-        Auto.AutoClaimRequest memory request = Auto.AutoClaimRequest({
+        AutoManager.AutoClaimRequest memory request = AutoManager.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: block.timestamp,
             claimInterval: 1 days,
             claimMinAmountUsd: 0,
             recipient: interactionInfo.from,
-            claimType: Auto.AutoClaimType.TIME,
-            transferType: Auto.TransferInfoInToken.BOTH
+            claimType: AutoManager.AutoClaimType.TIME,
+            transferType: BaseLPManager.TransferInfoInToken.BOTH
         });
         bool need = autoManager.needClaimFees(request);
         console.log("need", need);
@@ -328,14 +334,14 @@ contract AutoTest is Test, DeployUtils {
         vm.revertToState(snapshotId);
 
         // TODO: add checks with twaps and low cap tokens
-        request = Auto.AutoClaimRequest({
+        request = AutoManager.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: 0,
             claimInterval: 0,
-            claimMinAmountUsd: 10e8,
+            claimMinAmountUsd: 1e8,
             recipient: interactionInfo.from,
-            claimType: Auto.AutoClaimType.AMOUNT,
-            transferType: Auto.TransferInfoInToken.BOTH
+            claimType: AutoManager.AutoClaimType.AMOUNT,
+            transferType: BaseLPManager.TransferInfoInToken.BOTH
         });
         need = autoManager.needClaimFees(request);
         console.log("need", need);
@@ -361,13 +367,14 @@ contract AutoTest is Test, DeployUtils {
         int24 newUpper_
     ) public {
         _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
-        uint160 triggerPrice = TickMath.getSqrtRatioAtTick(tickUpper_ - pool_.tickSpacing());
-        Auto.AutoCloseRequest memory request = Auto.AutoCloseRequest({
+        (, int24 currentTick,,,,,) = pool_.slot0();
+        uint160 triggerPrice = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
+        AutoManager.AutoCloseRequest memory request = AutoManager.AutoCloseRequest({
             positionId: interactionInfo.positionId,
             triggerPrice: triggerPrice,
             belowOrAbove: false,
             recipient: interactionInfo.from,
-            transferType: Auto.TransferInfoInToken.BOTH
+            transferType: BaseLPManager.TransferInfoInToken.BOTH
         });
         bool need = autoManager.needClose(request);
         console.log("need close", need);
@@ -388,7 +395,7 @@ contract AutoTest is Test, DeployUtils {
     }
 }
 
-contract AutoTestBaseChain is AutoTest {
+contract AutoManagerTestBaseChain is AutoManagerTest {
     IUniswapV3Pool public pool;
 
     function setUp() public override {
@@ -406,7 +413,7 @@ contract AutoTestBaseChain is AutoTest {
         int24 tickSpacing = pool.tickSpacing();
         currentTick -= currentTick % tickSpacing;
         console.log("currentTick", currentTick);
-        uint256 amountIn0 = 3e18;
+        uint256 amountIn0 = 2e18;
         uint256 amountIn1 = 1e10;
         int24 tickLower = currentTick - tickSpacing * 400;
         int24 tickUpper = currentTick + tickSpacing * 400;
