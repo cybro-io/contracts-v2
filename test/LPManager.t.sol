@@ -27,6 +27,11 @@ abstract contract LPManagerTest is Test, DeployUtils {
 
     address public admin;
 
+    /// @notice Preview functions do not account for pool swap fees,
+    /// so actual values may be lower than previewed, when the pool fee is high,
+    /// increasing controlPrecision can help minimize discrepancies with preview results
+    uint256 public controlPrecision;
+
     struct InteractionInfo {
         uint256 positionId;
         IERC20Metadata token0;
@@ -50,6 +55,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
         admin = baseAdmin;
         _deployLPManager();
         swapper = new Swapper();
+        controlPrecision = 100;
     }
 
     function _deployLPManager() public {
@@ -181,10 +187,14 @@ abstract contract LPManagerTest is Test, DeployUtils {
         _movePoolPrice();
         // TODO maybe use snapshot to avoid errors
         claimFees(0, 0, BaseLPManager.TransferInfoInToken.TOKEN0);
+        console.log("FEES CLAIMED");
 
         withdraw(5000, 0, 0, BaseLPManager.TransferInfoInToken.BOTH);
+        console.log("WITHDRAWN 50%");
         withdraw(2500, 0, 0, BaseLPManager.TransferInfoInToken.TOKEN0);
+        console.log("WITHDRAWN 25%");
         withdraw(10000, 0, 0, BaseLPManager.TransferInfoInToken.TOKEN1);
+        console.log("WITHDRAWN 100%");
     }
 
     function createPosition(uint256 amountIn0_, uint256 amountIn1_, address recipient_, uint256 minLiquidity_)
@@ -222,14 +232,8 @@ abstract contract LPManagerTest is Test, DeployUtils {
         console.log("sqrtPriceX96", lpManager.getCurrentSqrtPriceX96(address(interactionInfo.pool)));
         console.log("balance of token0", interactionInfo.token0.balanceOf(interactionInfo.from));
         console.log("balance of token1", interactionInfo.token1.balanceOf(interactionInfo.from));
+        console.log("previewCreatePosition.liquidity", previewCreatePosition.liquidity);
 
-        vm.assertEq(interactionInfo.token0.balanceOf(address(lpManager)), 0);
-        vm.assertEq(interactionInfo.token1.balanceOf(address(lpManager)), 0);
-        vm.assertApproxEqAbs(previewCreatePosition.liquidity, liquidity, liquidity / 100);
-        vm.assertApproxEqAbs(previewCreatePosition.amount0, amount0, amount0 / 100);
-        vm.assertApproxEqAbs(previewCreatePosition.amount1, amount1, amount1 / 100);
-        vm.assertEq(positionManager.ownerOf(positionId), recipient_);
-        vm.assertGt(liquidity, 0);
         vm.assertLt(
             interactionInfo.token0.balanceOf(interactionInfo.from)
                 + _getAmount1In0(
@@ -239,6 +243,13 @@ abstract contract LPManagerTest is Test, DeployUtils {
             (amountIn0_ + _getAmount1In0(lpManager.getCurrentSqrtPriceX96(address(interactionInfo.pool)), amountIn1_))
                 / 300
         );
+        vm.assertEq(interactionInfo.token0.balanceOf(address(lpManager)), 0);
+        vm.assertEq(interactionInfo.token1.balanceOf(address(lpManager)), 0);
+        vm.assertApproxEqAbs(previewCreatePosition.liquidity, liquidity, liquidity / controlPrecision);
+        vm.assertApproxEqAbs(previewCreatePosition.amount0, amount0, amount0 / controlPrecision);
+        vm.assertApproxEqAbs(previewCreatePosition.amount1, amount1, amount1 / controlPrecision);
+        vm.assertEq(positionManager.ownerOf(positionId), recipient_);
+        vm.assertGt(liquidity, 0);
         vm.assertEq(interactionInfo.token0.balanceOf(address(protocolFeeCollector)), fee0);
         vm.assertEq(interactionInfo.token1.balanceOf(address(protocolFeeCollector)), fee1);
     }
@@ -255,9 +266,9 @@ abstract contract LPManagerTest is Test, DeployUtils {
         emit BaseLPManager.LiquidityIncreased(interactionInfo.positionId, 0, 0);
         (uint128 liquidity_, uint256 amount0_, uint256 amount1_) =
             lpManager.increaseLiquidity(interactionInfo.positionId, amountIn0_, amountIn1_, minLiquidity_);
-        vm.assertApproxEqAbs(previewIncreaseLiquidity.liquidity, liquidity_, liquidity_ / 100);
-        vm.assertApproxEqAbs(previewIncreaseLiquidity.amount0, amount0_, amount0_ / 100);
-        vm.assertApproxEqAbs(previewIncreaseLiquidity.amount1, amount1_, amount1_ / 100);
+        vm.assertApproxEqAbs(previewIncreaseLiquidity.liquidity, liquidity_, liquidity_ / controlPrecision);
+        vm.assertApproxEqAbs(previewIncreaseLiquidity.amount0, amount0_, amount0_ / controlPrecision);
+        vm.assertApproxEqAbs(previewIncreaseLiquidity.amount1, amount1_, amount1_ / controlPrecision);
         vm.stopPrank();
     }
 
@@ -284,8 +295,8 @@ abstract contract LPManagerTest is Test, DeployUtils {
             emit BaseLPManager.ClaimedFees(interactionInfo.positionId, 0, 0);
             (uint256 amount0_, uint256 amount1_) =
                 lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, minAmountOut0_, minAmountOut1_);
-            vm.assertApproxEqAbs(previewClaimFees.amount0, amount0_, amount0_ / 100);
-            vm.assertApproxEqAbs(previewClaimFees.amount1, amount1_, amount1_ / 100);
+            vm.assertApproxEqAbs(previewClaimFees.amount0, amount0_, amount0_ / controlPrecision);
+            vm.assertApproxEqAbs(previewClaimFees.amount1, amount1_, amount1_ / controlPrecision);
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
@@ -301,7 +312,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
             emit BaseLPManager.ClaimedFeesInToken(interactionInfo.positionId, address(tokenOut_), 0);
             (uint256 amountOut_) =
                 lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, address(tokenOut_), minAmountOut_);
-            vm.assertApproxEqAbs(previewClaimFees.amount1, amountOut_, amountOut_ / 100);
+            vm.assertApproxEqAbs(previewClaimFees.amount1, amountOut_, amountOut_ / controlPrecision);
         }
         vm.stopPrank();
     }
@@ -320,9 +331,13 @@ abstract contract LPManagerTest is Test, DeployUtils {
         vm.expectEmit(true, false, false, false, address(lpManager));
         emit BaseLPManager.CompoundedFees(interactionInfo.positionId, 0, 0);
         (uint256 liquidity_, uint256 amount0_, uint256 amount1_) = lpManager.compoundFees(interactionInfo.positionId, 0);
-        vm.assertApproxEqAbs(previewCompoundFees.liquidity, liquidity_, liquidity_ / 100);
-        vm.assertApproxEqAbs(previewCompoundFees.amount0, amount0_, amount0_ / 100);
-        vm.assertApproxEqAbs(previewCompoundFees.amount1, amount1_, amount1_ / 100);
+        console.log("previewCompoundFees.liquidity", previewCompoundFees.liquidity);
+        console.log("liquidity_", liquidity_);
+        console.log("amount0_", amount0_);
+        console.log("amount1_", amount1_);
+        vm.assertApproxEqAbs(previewCompoundFees.liquidity, liquidity_, liquidity_ / controlPrecision);
+        vm.assertApproxEqAbs(previewCompoundFees.amount0, amount0_, amount0_ / controlPrecision);
+        vm.assertApproxEqAbs(previewCompoundFees.amount1, amount1_, amount1_ / controlPrecision);
         vm.stopPrank();
     }
 
@@ -347,14 +362,15 @@ abstract contract LPManagerTest is Test, DeployUtils {
             interactionInfo.positionId, interactionInfo.from, interactionInfo.tickLower, interactionInfo.tickUpper, 0
         );
         vm.stopPrank();
-        vm.assertApproxEqAbs(previewMoveRange.liquidity, liquidity_, liquidity_ / 100);
-        vm.assertApproxEqAbs(previewMoveRange.amount0, amount0_, amount0_ / 100);
-        vm.assertApproxEqAbs(previewMoveRange.amount1, amount1_, amount1_ / 100);
         vm.assertEq(positionManager.ownerOf(newPositionId_), interactionInfo.from);
         interactionInfo.positionId = newPositionId_;
         BaseLPManager.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
         console.log("positionAfter.liquidity", positionAfter.liquidity);
         console.log("position.liquidity", position.liquidity);
+        console.log("previewMoveRange.liquidity", previewMoveRange.liquidity);
+        vm.assertApproxEqAbs(previewMoveRange.liquidity, liquidity_, liquidity_ / controlPrecision);
+        vm.assertApproxEqAbs(previewMoveRange.amount0, amount0_, amount0_ / controlPrecision);
+        vm.assertApproxEqAbs(previewMoveRange.amount1, amount1_, amount1_ / controlPrecision);
     }
 
     function withdraw(
@@ -380,8 +396,8 @@ abstract contract LPManagerTest is Test, DeployUtils {
             (uint256 amount0_, uint256 amount1_) = lpManager.withdraw(
                 interactionInfo.positionId, percent_, interactionInfo.from, minAmountOut0_, minAmountOut1_
             );
-            vm.assertApproxEqAbs(previewWithdraw.amount0, amount0_, amount0_ / 100);
-            vm.assertApproxEqAbs(previewWithdraw.amount1, amount1_, amount1_ / 100);
+            vm.assertApproxEqAbs(previewWithdraw.amount0, amount0_, amount0_ / controlPrecision);
+            vm.assertApproxEqAbs(previewWithdraw.amount1, amount1_, amount1_ / controlPrecision);
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
@@ -397,7 +413,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
             uint256 amountOut_ = lpManager.withdraw(
                 interactionInfo.positionId, percent_, interactionInfo.from, address(tokenOut_), minAmountOut_
             );
-            vm.assertApproxEqAbs(previewWithdraw.amount1, amountOut_, amountOut_ / 100);
+            vm.assertApproxEqAbs(previewWithdraw.amount1, amountOut_, amountOut_ / controlPrecision);
         }
         vm.stopPrank();
         BaseLPManager.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
@@ -439,95 +455,185 @@ contract LPManagerTestBaseChain is LPManagerTest {
 
     function test_weth_usdc() public {
         pool = weth_usdc_BASE;
-        uint256 amountIn0 = 3e18;
+        uint256 amountIn0 = 2e18;
         uint256 amountIn1 = 1e10;
         _test(amountIn0, amountIn1);
     }
 
-    // function test_clanker_weth() public {
-    //     pool = clanker_weth_BASE;
-    //     uint256 amountIn0 = 1e18;
-    //     uint256 amountIn1 = 10e18;
-    //     _test(amountIn0, amountIn1);
-    // }
+    function test_clanker_weth() public {
+        controlPrecision = 80;
+        pool = clanker_weth_BASE;
+        uint256 amountIn0 = 1e18;
+        uint256 amountIn1 = 1e18;
+        _test(amountIn0, amountIn1);
+    }
+
+    function test_virtual_weth() public {
+        pool = virtual_weth_BASE;
+        uint256 amountIn0 = 1000e18;
+        uint256 amountIn1 = 1e18;
+        _test(amountIn0, amountIn1);
+    }
 
     function _test(uint256 amountIn0, uint256 amountIn1) public {
-        // vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
-        // vm.assume(amountIn1 < 8e11 && amountIn1 > 1e6);
         (uint160 currentPrice, int24 currentTick,,,,,) = pool.slot0();
         int24 tickSpacing = pool.tickSpacing();
+        int24 diff = tickSpacing / 10;
         currentTick -= currentTick % tickSpacing;
+        console.log("tickSpacing", tickSpacing);
         console.log("currentTick", currentTick);
-        int24 tickLower = currentTick + tickSpacing * 20;
-        int24 tickUpper = tickLower + 4000;
-        int24 newLower = tickLower + tickSpacing * 40;
-        int24 newUpper = newLower + 4000;
+        int24 tickLower = currentTick + tickSpacing * (20 / diff);
+        int24 tickUpper = tickLower + tickSpacing * (400 / diff);
+        int24 newLower = tickLower + tickSpacing * (40 / diff);
+        int24 newUpper = newLower + tickSpacing * (4000 / diff);
 
         uint256 snapshotId = vm.snapshotState();
+        console.log("FIRST TEST");
         baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
         vm.revertToState(snapshotId);
 
-        newLower = tickLower - tickSpacing * 600;
-        newUpper = newLower + 4000;
+        console.log("SECOND TEST");
+        newLower = tickLower - tickSpacing * (600 / diff);
+        newUpper = newLower + tickSpacing * (4000 / diff);
         baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
         vm.revertToState(snapshotId);
 
-        tickLower = currentTick - tickSpacing * 400;
-        tickUpper = currentTick + tickSpacing * 400;
-        newLower = tickLower + tickSpacing * 8;
-        newUpper = newLower + 4000;
+        console.log("THIRD TEST");
+        tickLower = currentTick - tickSpacing * (400 / diff);
+        tickUpper = currentTick + tickSpacing * (400 / diff);
+        newLower = tickLower - tickSpacing * (30 / diff);
+        newUpper = newLower + tickSpacing * (4000 / diff);
         baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
         vm.revertToState(snapshotId);
 
-        newLower = tickLower - tickSpacing * 700;
-        newUpper = newLower + 4000;
+        console.log("FOURTH TEST");
+        newLower = tickLower - tickSpacing * (700 / diff);
+        newUpper = newLower + tickSpacing * (4000 / diff);
         baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
         vm.revertToState(snapshotId);
     }
 }
 
-// contract LPManagerTestArbitrum is LPManagerTest {
-//     function setUp() public override {
-//         vm.createSelectFork("arbitrum", lastCachedBlockid_ARBITRUM);
-//         positionManager = positionManager_UNI_ARB;
-//         // pool =
-//         super.setUp();
-//     }
+contract LPManagerTestArbitrum is LPManagerTest {
+    IUniswapV3Pool public pool;
 
-//     function test(uint256 amountIn0, uint256 amountIn1, int24 tickLower, int24 tickUpper) public {
-//         vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
-//         vm.assume(amountIn1 < 1e20 && amountIn1 > 1e4);
-//         (, int24 currentTick,,,,,) = pool.slot0();
-//         tickLower = int24(bound(tickLower, currentTick - 1e5, currentTick + 1e5));
-//         tickUpper = int24(bound(tickUpper, currentTick - 1e5, currentTick + 1e5));
-//         tickLower -= tickLower % pool.tickSpacing();
-//         tickUpper -= tickUpper % pool.tickSpacing();
-//         if (tickLower > tickUpper) {
-//             (tickLower, tickUpper) = (tickUpper, tickLower);
-//         }
-//         baseline(user, amountIn0, amountIn1, pool);
-//     }
-// }
+    function setUp() public override {
+        vm.createSelectFork("arbitrum", lastCachedBlockid_ARBITRUM);
+        positionManager = positionManager_UNI_ARB;
+        super.setUp();
+    }
 
-// contract LPManagerTestUnichain is LPManagerTest {
-//     function setUp() public override {
-//         vm.createSelectFork("unichian", lastCachedBlockid_UNICHAIN);
-//         positionManager = positionManager_UNI_ARB;
-//         // pool =
-//         super.setUp();
-//     }
+    function test_wbtc_weth() public {
+        pool = wbtc_weth_ARB;
+        uint256 amountIn0 = 4e6;
+        uint256 amountIn1 = 1e18;
+        _test(amountIn0, amountIn1);
+    }
 
-//     function test(uint256 amountIn0, uint256 amountIn1, int24 tickLower, int24 tickUpper) public {
-//         vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
-//         vm.assume(amountIn1 < 1e20 && amountIn1 > 1e4);
-//         (, int24 currentTick,,,,,) = pool.slot0();
-//         tickLower = int24(bound(tickLower, currentTick - 1e5, currentTick + 1e5));
-//         tickUpper = int24(bound(tickUpper, currentTick - 1e5, currentTick + 1e5));
-//         tickLower -= tickLower % pool.tickSpacing();
-//         tickUpper -= tickUpper % pool.tickSpacing();
-//         if (tickLower > tickUpper) {
-//             (tickLower, tickUpper) = (tickUpper, tickLower);
-//         }
-//         baseline(user, amountIn0, amountIn1, pool);
-//     }
-// }
+    function test_wbtc_usdt() public {
+        pool = wbtc_usdt_ARB;
+        uint256 amountIn0 = 4e6;
+        uint256 amountIn1 = 1000e6;
+        _test(amountIn0, amountIn1);
+    }
+
+    function test_usdc_weth() public {
+        pool = usdc_weth_ARB;
+        uint256 amountIn0 = 1e18;
+        uint256 amountIn1 = 1000e6;
+        _test(amountIn0, amountIn1);
+    }
+
+    function _test(uint256 amountIn0, uint256 amountIn1) public {
+        (uint160 currentPrice, int24 currentTick,,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        int24 diff = tickSpacing / 10;
+        currentTick -= currentTick % tickSpacing;
+        console.log("tickSpacing", tickSpacing);
+        console.log("currentTick", currentTick);
+        int24 tickLower = currentTick + tickSpacing * (20 / diff);
+        int24 tickUpper = tickLower + tickSpacing * (400 / diff);
+        int24 newLower = tickLower + tickSpacing * (40 / diff);
+        int24 newUpper = newLower + tickSpacing * (4000 / diff);
+
+        uint256 snapshotId = vm.snapshotState();
+        console.log("FIRST TEST");
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+
+        console.log("SECOND TEST");
+        newLower = tickLower - tickSpacing * (600 / diff);
+        newUpper = newLower + tickSpacing * (4000 / diff);
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+
+        console.log("THIRD TEST");
+        tickLower = currentTick - tickSpacing * (400 / diff);
+        tickUpper = currentTick + tickSpacing * (400 / diff);
+        newLower = tickLower - tickSpacing * (30 / diff);
+        newUpper = newLower + tickSpacing * (4000 / diff);
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+
+        console.log("FOURTH TEST");
+        newLower = tickLower - tickSpacing * (700 / diff);
+        newUpper = newLower + tickSpacing * (4000 / diff);
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+    }
+}
+
+contract LPManagerTestUnichain is LPManagerTest {
+    IUniswapV3Pool public pool;
+
+    function setUp() public override {
+        vm.createSelectFork("unichain", lastCachedBlockid_UNICHAIN);
+        positionManager = positionManager_UNI_UNICHAIN;
+        super.setUp();
+    }
+
+    function test_usdc_weth() public {
+        pool = usdc_weth_UNICHAIN;
+        uint256 amountIn0 = 1000e6;
+        uint256 amountIn1 = 1e18;
+        _test(amountIn0, amountIn1);
+    }
+
+    function _test(uint256 amountIn0, uint256 amountIn1) public {
+        (uint160 currentPrice, int24 currentTick,,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        int24 diff = tickSpacing / 10;
+        currentTick -= currentTick % tickSpacing;
+        console.log("tickSpacing", tickSpacing);
+        console.log("currentTick", currentTick);
+        int24 tickLower = currentTick + tickSpacing * (20 / diff);
+        int24 tickUpper = tickLower + tickSpacing * (400 / diff);
+        int24 newLower = tickLower + tickSpacing * (40 / diff);
+        int24 newUpper = newLower + tickSpacing * (400 / diff);
+
+        uint256 snapshotId = vm.snapshotState();
+        console.log("FIRST TEST");
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+
+        console.log("SECOND TEST");
+        newLower = tickLower - tickSpacing * (600 / diff);
+        newUpper = newLower + tickSpacing * (400 / diff);
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+
+        console.log("THIRD TEST");
+        tickLower = currentTick - tickSpacing * (400 / diff);
+        tickUpper = currentTick + tickSpacing * (400 / diff);
+        newLower = tickLower - tickSpacing * (30 / diff);
+        newUpper = newLower + tickSpacing * (400 / diff);
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+
+        console.log("FOURTH TEST");
+        newLower = tickLower - tickSpacing * (700 / diff);
+        newUpper = newLower + tickSpacing * (400 / diff);
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+    }
+}

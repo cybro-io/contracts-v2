@@ -13,8 +13,13 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {BaseLPManager} from "./BaseLPManager.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {console} from "forge-std/console.sol";
 
+/**
+ * @title AutoManager
+ * @notice Automation layer on top of BaseLPManager providing signed requests for auto-claim, auto-close and auto-rebalance.
+ * @dev Verifies EIP712 signed intents by the position owner, evaluates on-chain conditions (price, fees, time) and
+ *      executes flows inherited from BaseLPManager.
+ */
 contract AutoManager is BaseLPManager, EIP712 {
     using SafeERC20 for IERC20Metadata;
     using ECDSA for bytes32;
@@ -61,7 +66,7 @@ contract AutoManager is BaseLPManager, EIP712 {
 
     /* ============ CONSTANTS ============ */
 
-    /// @notice Maximum deviation
+    /// @notice Maximum allowed deviation from the trusted price (10%)
     uint32 public constant maxDeviation = 1000;
 
     bytes32 constant AUTO_CLAIM_REQUEST_TYPEHASH = keccak256(
@@ -96,6 +101,11 @@ contract AutoManager is BaseLPManager, EIP712 {
 
     /* ============ EXTERNAL FUNCTIONS ============ */
 
+    /**
+     * @notice Executes fee claim if `needClaimFees` returns true for the given request
+     * @param request Packed claim parameters and preferences
+     * @param signature EIP-712 signature by the current position owner
+     */
     function autoClaimFees(AutoClaimRequest calldata request, bytes memory signature) external {
         require(needClaimFees(request));
         address signer =
@@ -105,6 +115,11 @@ contract AutoManager is BaseLPManager, EIP712 {
         lastAutoClaim[request.positionId] = block.timestamp;
     }
 
+    /**
+     * @notice Executes full withdrawal if `needClose` returns true for the given request
+     * @param request Close parameters including trigger price and side
+     * @param signature EIP-712 signature by the current position owner
+     */
     function autoClose(AutoCloseRequest calldata request, bytes memory signature) external {
         require(needClose(request));
         address signer =
@@ -113,6 +128,11 @@ contract AutoManager is BaseLPManager, EIP712 {
         _withdrawWithCollect(request.positionId, PRECISION, request.recipient, request.transferType);
     }
 
+    /**
+     * @notice Recenters position range if `needRebalance` returns true for the given request
+     * @param request Rebalance parameters including trigger bounds
+     * @param signature EIP-712 signature by the current position owner
+     */
     function autoRebalance(AutoRebalanceRequest calldata request, bytes memory signature) external {
         require(needRebalance(request));
         address signer =
@@ -138,6 +158,11 @@ contract AutoManager is BaseLPManager, EIP712 {
 
     /* ============ VIEW FUNCTIONS ============ */
 
+    /**
+     * @notice Evaluates whether fees should be claimed based on time/amount policy
+     * @param request Claim policy and thresholds
+     * @return True if claim should be executed now
+     */
     function needClaimFees(AutoClaimRequest calldata request) public view returns (bool) {
         if (
             (request.claimType == AutoClaimType.TIME || request.claimType == AutoClaimType.BOTH)
@@ -158,12 +183,22 @@ contract AutoManager is BaseLPManager, EIP712 {
         return false;
     }
 
+    /**
+     * @notice Evaluates whether position should be closed based on sqrt price trigger
+     * @param request Close parameters including trigger and direction
+     * @return True if close should be executed now
+     */
     function needClose(AutoCloseRequest memory request) public view returns (bool) {
         PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
         uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(poolInfo.pool));
         return request.belowOrAbove ? currentSqrt <= request.triggerPrice : currentSqrt >= request.triggerPrice;
     }
 
+    /**
+     * @notice Evaluates whether position range should be moved based on trigger bounds
+     * @param request Rebalance parameters
+     * @return True if rebalance should be executed now
+     */
     function needRebalance(AutoRebalanceRequest memory request) public view returns (bool) {
         PositionContext memory ctx = _getPositionContext(request.positionId);
         uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
@@ -204,11 +239,8 @@ contract AutoManager is BaseLPManager, EIP712 {
      */
     function _checkPriceManipulation(PoolInfo memory poolInfo) internal view {
         uint256 trustedSqrtPrice = _getTrustedSqrtPrice(poolInfo);
-        console.log("trustedSqrtPrice", trustedSqrtPrice);
         uint256 currentSqrtPrice = getCurrentSqrtPriceX96(poolInfo.pool);
-        console.log("currentSqrtPrice", currentSqrtPrice);
         uint256 deviation = FullMath.mulDiv(currentSqrtPrice ** 2, PRECISION, trustedSqrtPrice ** 2);
-        console.log("deviation", deviation);
         require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
     }
 

@@ -409,7 +409,7 @@ contract AutoManagerTestBaseChain is AutoManagerTest {
     function test2() public {
         // vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
         // vm.assume(amountIn1 < 8e11 && amountIn1 > 1e6);
-        (uint160 currentPrice, int24 currentTick,,,,,) = pool.slot0();
+        (, int24 currentTick,,,,,) = pool.slot0();
         int24 tickSpacing = pool.tickSpacing();
         currentTick -= currentTick % tickSpacing;
         console.log("currentTick", currentTick);

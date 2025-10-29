@@ -38,9 +38,9 @@ contract DeployUtils is StdCheats {
 
     /* ========== CACHED BLOCKIDS ========== */
 
-    uint256 lastCachedBlockid_ARBITRUM = 300132227;
-    uint256 lastCachedBlockid_BASE = 35716576;
-    uint256 lastCachedBlockid_UNICHAIN = 14499700;
+    uint256 lastCachedBlockid_ARBITRUM = 394596223;
+    uint256 lastCachedBlockid_BASE = 37467570;
+    uint256 lastCachedBlockid_UNICHAIN = 30985995;
 
     /* ========== ASSETS ========== */
 
@@ -62,11 +62,14 @@ contract DeployUtils is StdCheats {
     IERC20Metadata susds_BASE = IERC20Metadata(address(0x5875eEE11Cf8398102FdAd704C9E96607675467a));
     IERC20Metadata wstETH_BASE = IERC20Metadata(address(0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452));
     IERC20Metadata clanker_BASE = IERC20Metadata(address(0x1bc0c42215582d5A085795f4baDbaC3ff36d1Bcb));
+    IERC20Metadata virtual_BASE = IERC20Metadata(address(0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b));
 
     IAaveOracle aaveOracle_BASE = IAaveOracle(address(0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156));
 
     /* UNICHAIN */
     IERC20Metadata usdc_UNICHAIN = IERC20Metadata(address(0x078D782b760474a361dDA0AF3839290b0EF57AD6));
+    IERC20Metadata weth_UNICHAIN = IERC20Metadata(address(0x4200000000000000000000000000000000000006));
+    IERC20Metadata wbtc_UNICHAIN = IERC20Metadata(address(0x927B51f251480a681271180DA4de28D44EC4AfB8));
 
     /* ============ POOLS ============ */
 
@@ -81,6 +84,11 @@ contract DeployUtils is StdCheats {
     IUniswapV3Pool wbtc_weth_ARB = IUniswapV3Pool(address(0x2f5e87C9312fa29aed5c179E456625D79015299c));
     IUniswapV3Pool wbtc_usdt_ARB = IUniswapV3Pool(address(0x5969EFddE3cF5C0D9a88aE51E47d721096A97203));
     IUniswapV3Pool usdc_weth_ARB = IUniswapV3Pool(address(0xC6962004f452bE9203591991D15f6b388e09E8D0));
+
+    /* UNICHAIN */
+    IUniswapV3Pool usdc_weth_UNICHAIN = IUniswapV3Pool(address(0x8927058918e3CFf6F55EfE45A58db1be1F069E49));
+    IUniswapV3Pool usdc_weth_005_UNICHAIN = IUniswapV3Pool(address(0x65081CB48d74A32e9CCfED75164b8c09972DBcF1));
+    IUniswapV3Pool weth_wbtc_UNICHAIN = IUniswapV3Pool(address(0x1D6ae37DB0e36305019fB3d4bad2750B8784aDF9));
 
     /* ============ ASSET PROVIDERS ============ */
 

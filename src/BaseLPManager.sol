@@ -194,6 +194,11 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
 
     /* ============ VIEWS ============ */
 
+    /**
+     * @notice Returns current sqrt price (Q96) for the given pool
+     * @param pool Pool address
+     * @return sqrtPriceX96 Current sqrt price in Q96 format
+     */
     function getCurrentSqrtPriceX96(address pool) public view returns (uint256 sqrtPriceX96) {
         (sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
     }
@@ -259,10 +264,21 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         ctx = PositionContext({poolInfo: poolInfo, tickLower: tickLower, tickUpper: tickUpper});
     }
 
+    /**
+     * @notice Reads current liquidity of a Uniswap V3 position
+     * @param tokenId Position NFT id
+     * @return liquidity Current position liquidity
+     */
     function _getTokenLiquidity(uint256 tokenId) internal view virtual returns (uint128 liquidity) {
         (,,,,,,, liquidity,,,,) = positionManager.positions(tokenId);
     }
 
+    /**
+     * @notice Reads tokens owed (fees and collected amounts not yet withdrawn) from a position
+     * @param tokenId Position NFT id
+     * @return amount0 Tokens owed in token0
+     * @return amount1 Tokens owed in token1
+     */
     function _getTokensOwed(uint256 tokenId) internal view virtual returns (uint128 amount0, uint128 amount1) {
         (,,,,,,,,,, amount0, amount1) = positionManager.positions(tokenId);
     }
@@ -329,6 +345,7 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
      * @param amount1 Amount of token1
      * @param recipient Recipient of the position
      * @param minLiquidity Minimal acceptable liquidity minted
+     * @param sendBackTo Recipient of the remaining tokens
      * @return positionId Position id
      * @return liquidity Minted liquidity in the new position
      * @return amount0Used Amount of token0 used in the new position
@@ -372,21 +389,42 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         );
     }
 
+    /**
+     * @notice Collects all owed amounts for a position into this contract
+     * @param positionId Position id
+     * @return amount0 Collected token0
+     * @return amount1 Collected token1
+     */
     function _collect(uint256 positionId) internal returns (uint256 amount0, uint256 amount1) {
-        (amount0, amount1) = _collect(positionId, address(this), type(uint128).max, type(uint128).max);
+        (amount0, amount1) = _collect(positionId, type(uint128).max, type(uint128).max);
     }
 
-    function _collect(uint256 positionId, address recipient, uint128 amount0Max, uint128 amount1Max)
+    /**
+     * @notice Collects owed amounts for a position
+     * @param positionId Position id
+     * @param amount0Max Max token0 to collect
+     * @param amount1Max Max token1 to collect
+     * @return amount0 Collected token0
+     * @return amount1 Collected token1
+     */
+    function _collect(uint256 positionId, uint128 amount0Max, uint128 amount1Max)
         internal
         returns (uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = positionManager.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: positionId, recipient: recipient, amount0Max: amount0Max, amount1Max: amount1Max
+                tokenId: positionId, recipient: address(this), amount0Max: amount0Max, amount1Max: amount1Max
             })
         );
     }
 
+    /**
+     * @notice Decreases liquidity and collects proportional owed tokens
+     * @param positionId Position id
+     * @param percent Basis points of liquidity to withdraw (1e4 = 100%)
+     * @return amount0 Token0 received
+     * @return amount1 Token1 received
+     */
     function _withdraw(uint256 positionId, uint32 percent) internal returns (uint256 amount0, uint256 amount1) {
         uint128 totalLiquidity = _getTokenLiquidity(positionId);
         (uint256 liq0, uint256 liq1) = positionManager.decreaseLiquidity(
@@ -401,7 +439,6 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         (uint128 owed0, uint128 owed1) = _getTokensOwed(positionId);
         (amount0, amount1) = _collect(
             positionId,
-            address(this),
             uint128(liq0 + (uint256(owed0) - liq0) * percent / PRECISION),
             uint128(liq1 + (uint256(owed1) - liq1) * percent / PRECISION)
         );
@@ -442,6 +479,17 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         return amount - protocolFee;
     }
 
+    /**
+     * @notice Applies protocol fee, optionally swaps into a single token and transfers outputs
+     * @param amount0In Input amount of token0 before fee
+     * @param amount1In Input amount of token1 before fee
+     * @param positionId Position id (used to resolve pool and tokens)
+     * @param transferInfoInToken Transfer mode: BOTH or single token
+     * @param feeType Fee type to apply (LIQUIDITY/DEPOSIT/FEES)
+     * @param recipient Receiver of final outputs
+     * @return amount0 Final amount of token0 transferred
+     * @return amount1 Final amount of token1 transferred
+     */
     function _collectSwapTransfer(
         uint256 amount0In,
         uint256 amount1In,
@@ -638,6 +686,17 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
             );
     }
 
+    /**
+     * @notice Calculates unclaimed fees inside a range using Uniswap V3 fee growth accumulators
+     * @param pool Pool address
+     * @param tickLower Lower tick
+     * @param tickUpper Upper tick
+     * @param liquidity Liquidity
+     * @param feeGrowthInside0LastX128 Fee growth inside token0 last
+     * @param feeGrowthInside1LastX128 Fee growth inside token1 last
+     * @return fee0 Unclaimed token0 fees
+     * @return fee1 Unclaimed token1 fees
+     */
     function _calculateUnclaimedFees(
         address pool,
         int24 tickLower,
@@ -678,6 +737,11 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         }
     }
 
+    /**
+     * @notice Ensures allowance for the position manager is at least the required amount
+     * @param token ERC20 token address
+     * @param amount Minimal allowance required
+     */
     function _ensureAllowance(address token, uint256 amount) internal {
         uint256 currentAllowance = IERC20Metadata(token).allowance(address(this), address(positionManager));
         if (currentAllowance < amount) {
@@ -710,6 +774,10 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
 
     /* ============ CALLBACK ============ */
 
+    /**
+     * @inheritdoc IUniswapV3SwapCallback
+     * @dev Validates caller pool and settles the exact input/output leg by transferring tokens back to pool.
+     */
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external override {
         if (!(amount0Delta > 0 || amount1Delta > 0)) revert InvalidSwapCallbackDeltas();
         (address tokenIn, address tokenOut, uint24 fee) = abi.decode(data, (address, address, uint24));
