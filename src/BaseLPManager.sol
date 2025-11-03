@@ -490,7 +490,7 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
      * @return amount0 Final amount of token0 transferred
      * @return amount1 Final amount of token1 transferred
      */
-    function _collectSwapTransfer(
+    function _chargeFeeSwapTransfer(
         uint256 amount0In,
         uint256 amount1In,
         uint256 positionId,
@@ -610,14 +610,14 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         }
     }
 
-    function _withdrawWithCollect(
+    function _withdrawAndChargeFee(
         uint256 positionId,
         uint32 percent,
         address recipient,
         TransferInfoInToken transferInfoInToken
     ) internal returns (uint256 amount0, uint256 amount1) {
         (amount0, amount1) = _withdraw(positionId, percent);
-        (amount0, amount1) = _collectSwapTransfer(
+        (amount0, amount1) = _chargeFeeSwapTransfer(
             amount0, amount1, positionId, transferInfoInToken, IProtocolFeeCollector.FeeType.LIQUIDITY, recipient
         );
     }
@@ -635,7 +635,7 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         returns (uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = _collect(positionId);
-        (amount0, amount1) = _collectSwapTransfer(
+        (amount0, amount1) = _chargeFeeSwapTransfer(
             amount0, amount1, positionId, transferInfoInToken, IProtocolFeeCollector.FeeType.FEES, recipient
         );
     }
@@ -779,9 +779,9 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
      * @dev Validates caller pool and settles the exact input/output leg by transferring tokens back to pool.
      */
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external override {
-        if (!(amount0Delta > 0 || amount1Delta > 0)) revert InvalidSwapCallbackDeltas();
+        require(amount0Delta > 0 || amount1Delta > 0, InvalidSwapCallbackDeltas());
         (address tokenIn, address tokenOut, uint24 fee) = abi.decode(data, (address, address, uint24));
-        if (factory.getPool(tokenIn, tokenOut, fee) != msg.sender) revert InvalidSwapCallbackCaller();
+        require(factory.getPool(tokenIn, tokenOut, fee) == msg.sender, InvalidSwapCallbackCaller());
         (bool isExactInput, uint256 amountToPay) =
             amount0Delta > 0 ? (tokenIn < tokenOut, uint256(amount0Delta)) : (tokenOut < tokenIn, uint256(amount1Delta));
 

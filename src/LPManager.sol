@@ -461,7 +461,7 @@ contract LPManager is BaseLPManager {
         uint256 minAmountOut1
     ) external onlyPositionOwner(positionId) returns (uint256 amount0, uint256 amount1) {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
-        (amount0, amount1) = _withdrawWithCollect(positionId, percent, recipient, TransferInfoInToken.BOTH);
+        (amount0, amount1) = _withdrawAndChargeFee(positionId, percent, recipient, TransferInfoInToken.BOTH);
         require(amount0 >= minAmountOut0, Amount0LessThanMin());
         require(amount1 >= minAmountOut1, Amount1LessThanMin());
         emit WithdrawnBothTokens(positionId, poolInfo.token0, poolInfo.token1, amount0, amount1);
@@ -484,7 +484,7 @@ contract LPManager is BaseLPManager {
     {
         PoolInfo memory poolInfo = _getPoolInfoById(positionId);
         require(tokenOut == poolInfo.token0 || tokenOut == poolInfo.token1, InvalidTokenOut());
-        (uint256 amount0, uint256 amount1) = _withdrawWithCollect(
+        (uint256 amount0, uint256 amount1) = _withdrawAndChargeFee(
             positionId,
             percent,
             recipient,

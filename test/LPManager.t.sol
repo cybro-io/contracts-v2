@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {LPManager} from "../src/LPManager.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
@@ -209,8 +210,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
         );
         uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         uint256 fee1 = protocolFeeCollector.calculateProtocolFee(amountIn1_, ProtocolFeeCollector.FeeType.LIQUIDITY);
-        vm.expectEmit(false, false, false, false, address(lpManager));
-        emit BaseLPManager.PositionCreated(0, 0, 0, 0, 0, 0, 0);
+        vm.recordLogs();
         (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition(
             address(interactionInfo.pool),
             amountIn0_,
@@ -221,6 +221,20 @@ abstract contract LPManagerTest is Test, DeployUtils {
             minLiquidity_
         );
         vm.stopPrank();
+        {
+            Vm.Log[] memory entries = vm.getRecordedLogs();
+            bytes32 sig = keccak256(bytes("PositionCreated(uint256,uint128,uint256,uint256,int24,int24,uint256)"));
+            bool found;
+            for (uint256 i; i < entries.length; i++) {
+                if (entries[i].emitter == address(lpManager)
+                    && entries[i].topics.length > 0
+                    && entries[i].topics[0] == sig) {
+                    found = true;
+                    break;
+                }
+            }
+            vm.assertTrue(found, "PositionCreated not emitted");
+        }
         console.log("currentPrice", lpManager.getCurrentSqrtPriceX96(address(interactionInfo.pool)));
         interactionInfo.positionId = positionId;
         console.log("positionId", positionId);
@@ -262,13 +276,28 @@ abstract contract LPManagerTest is Test, DeployUtils {
         PreviewInfo memory previewIncreaseLiquidity;
         (previewIncreaseLiquidity.liquidity, previewIncreaseLiquidity.amount0, previewIncreaseLiquidity.amount1) =
             lpManager.previewIncreaseLiquidity(interactionInfo.positionId, amountIn0_, amountIn1_);
-        vm.expectEmit(true, false, false, false, address(lpManager));
-        emit BaseLPManager.LiquidityIncreased(interactionInfo.positionId, 0, 0);
+        vm.recordLogs();
         (uint128 liquidity_, uint256 amount0_, uint256 amount1_) =
             lpManager.increaseLiquidity(interactionInfo.positionId, amountIn0_, amountIn1_, minLiquidity_);
         vm.assertApproxEqAbs(previewIncreaseLiquidity.liquidity, liquidity_, liquidity_ / controlPrecision);
         vm.assertApproxEqAbs(previewIncreaseLiquidity.amount0, amount0_, amount0_ / controlPrecision);
         vm.assertApproxEqAbs(previewIncreaseLiquidity.amount1, amount1_, amount1_ / controlPrecision);
+        {
+            Vm.Log[] memory entries = vm.getRecordedLogs();
+            bytes32 sig = keccak256(bytes("LiquidityIncreased(uint256,uint256,uint256)"));
+            bool found;
+            bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
+            for (uint256 i; i < entries.length; i++) {
+                if (entries[i].emitter == address(lpManager)
+                    && entries[i].topics.length > 1
+                    && entries[i].topics[0] == sig
+                    && entries[i].topics[1] == expectedId) {
+                    found = true;
+                    break;
+                }
+            }
+            vm.assertTrue(found, "LiquidityIncreased not emitted");
+        }
         vm.stopPrank();
     }
 
@@ -291,12 +320,27 @@ abstract contract LPManagerTest is Test, DeployUtils {
         if (transferIn == BaseLPManager.TransferInfoInToken.BOTH) {
             (previewClaimFees.amount0, previewClaimFees.amount1) =
                 lpManager.previewClaimFees(interactionInfo.positionId);
-            vm.expectEmit(true, false, false, false, address(lpManager));
-            emit BaseLPManager.ClaimedFees(interactionInfo.positionId, 0, 0);
+            vm.recordLogs();
             (uint256 amount0_, uint256 amount1_) =
                 lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, minAmountOut0_, minAmountOut1_);
             vm.assertApproxEqAbs(previewClaimFees.amount0, amount0_, amount0_ / controlPrecision);
             vm.assertApproxEqAbs(previewClaimFees.amount1, amount1_, amount1_ / controlPrecision);
+            {
+                Vm.Log[] memory entries = vm.getRecordedLogs();
+                bytes32 sig = keccak256(bytes("ClaimedFees(uint256,uint256,uint256)"));
+                bool found;
+                bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
+                for (uint256 i; i < entries.length; i++) {
+                    if (entries[i].emitter == address(lpManager)
+                        && entries[i].topics.length > 1
+                        && entries[i].topics[0] == sig
+                        && entries[i].topics[1] == expectedId) {
+                        found = true;
+                        break;
+                    }
+                }
+                vm.assertTrue(found, "ClaimedFees not emitted");
+            }
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
@@ -308,11 +352,26 @@ abstract contract LPManagerTest is Test, DeployUtils {
                 minAmountOut_ = minAmountOut1_;
             }
             previewClaimFees.amount1 = lpManager.previewClaimFees(interactionInfo.positionId, address(tokenOut_));
-            vm.expectEmit(true, false, false, false, address(lpManager));
-            emit BaseLPManager.ClaimedFeesInToken(interactionInfo.positionId, address(tokenOut_), 0);
+            vm.recordLogs();
             (uint256 amountOut_) =
                 lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, address(tokenOut_), minAmountOut_);
             vm.assertApproxEqAbs(previewClaimFees.amount1, amountOut_, amountOut_ / controlPrecision);
+            {
+                Vm.Log[] memory entries = vm.getRecordedLogs();
+                bytes32 sig = keccak256(bytes("ClaimedFeesInToken(uint256,address,uint256)"));
+                bool found;
+                bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
+                for (uint256 i; i < entries.length; i++) {
+                    if (entries[i].emitter == address(lpManager)
+                        && entries[i].topics.length > 1
+                        && entries[i].topics[0] == sig
+                        && entries[i].topics[1] == expectedId) {
+                        found = true;
+                        break;
+                    }
+                }
+                vm.assertTrue(found, "ClaimedFeesInToken not emitted");
+            }
         }
         vm.stopPrank();
     }
@@ -328,8 +387,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
         PreviewInfo memory previewCompoundFees;
         (previewCompoundFees.liquidity, previewCompoundFees.amount0, previewCompoundFees.amount1) =
             lpManager.previewCompoundFees(interactionInfo.positionId);
-        vm.expectEmit(true, false, false, false, address(lpManager));
-        emit BaseLPManager.CompoundedFees(interactionInfo.positionId, 0, 0);
+        vm.recordLogs();
         (uint256 liquidity_, uint256 amount0_, uint256 amount1_) = lpManager.compoundFees(interactionInfo.positionId, 0);
         console.log("previewCompoundFees.liquidity", previewCompoundFees.liquidity);
         console.log("liquidity_", liquidity_);
@@ -338,6 +396,22 @@ abstract contract LPManagerTest is Test, DeployUtils {
         vm.assertApproxEqAbs(previewCompoundFees.liquidity, liquidity_, liquidity_ / controlPrecision);
         vm.assertApproxEqAbs(previewCompoundFees.amount0, amount0_, amount0_ / controlPrecision);
         vm.assertApproxEqAbs(previewCompoundFees.amount1, amount1_, amount1_ / controlPrecision);
+        {
+            Vm.Log[] memory entries = vm.getRecordedLogs();
+            bytes32 sig = keccak256(bytes("CompoundedFees(uint256,uint256,uint256)"));
+            bool found;
+            bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
+            for (uint256 i; i < entries.length; i++) {
+                if (entries[i].emitter == address(lpManager)
+                    && entries[i].topics.length > 1
+                    && entries[i].topics[0] == sig
+                    && entries[i].topics[1] == expectedId) {
+                    found = true;
+                    break;
+                }
+            }
+            vm.assertTrue(found, "CompoundedFees not emitted");
+        }
         vm.stopPrank();
     }
 
@@ -356,12 +430,28 @@ abstract contract LPManagerTest is Test, DeployUtils {
             interactionInfo.positionId, interactionInfo.tickLower, interactionInfo.tickUpper
         );
         BaseLPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
-        vm.expectEmit(false, true, false, false, address(lpManager));
-        emit BaseLPManager.RangeMoved(0, interactionInfo.positionId, 0, 0, 0, 0);
+        uint256 oldPositionId_ = interactionInfo.positionId;
+        vm.recordLogs();
         (uint256 newPositionId_, uint128 liquidity_, uint256 amount0_, uint256 amount1_) = lpManager.moveRange(
             interactionInfo.positionId, interactionInfo.from, interactionInfo.tickLower, interactionInfo.tickUpper, 0
         );
         vm.stopPrank();
+        {
+            Vm.Log[] memory entries = vm.getRecordedLogs();
+            bytes32 sig = keccak256(bytes("RangeMoved(uint256,uint256,int24,int24,uint256,uint256)"));
+            bool found;
+            bytes32 expectedOldId = bytes32(uint256(oldPositionId_));
+            for (uint256 i; i < entries.length; i++) {
+                if (entries[i].emitter == address(lpManager)
+                    && entries[i].topics.length > 2
+                    && entries[i].topics[0] == sig
+                    && entries[i].topics[2] == expectedOldId) {
+                    found = true;
+                    break;
+                }
+            }
+            vm.assertTrue(found, "RangeMoved not emitted");
+        }
         vm.assertEq(positionManager.ownerOf(newPositionId_), interactionInfo.from);
         interactionInfo.positionId = newPositionId_;
         BaseLPManager.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);

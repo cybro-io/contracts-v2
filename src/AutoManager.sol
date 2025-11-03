@@ -13,6 +13,7 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {BaseLPManager} from "./BaseLPManager.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 /**
  * @title AutoManager
@@ -20,17 +21,11 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  * @dev Verifies EIP712 signed intents by the position owner, evaluates on-chain conditions (price, fees, time) and
  *      executes flows inherited from BaseLPManager.
  */
-contract AutoManager is BaseLPManager, EIP712 {
+contract AutoManager is BaseLPManager, EIP712, AccessControl {
     using SafeERC20 for IERC20Metadata;
     using ECDSA for bytes32;
 
     /* ============ TYPES ============ */
-
-    enum AutoClaimType {
-        TIME,
-        AMOUNT,
-        BOTH
-    }
 
     struct AutoCloseRequest {
         uint256 positionId;
@@ -38,6 +33,7 @@ contract AutoManager is BaseLPManager, EIP712 {
         bool belowOrAbove;
         address recipient;
         TransferInfoInToken transferType;
+        uint256 nonce;
     }
 
     struct AutoClaimRequest {
@@ -46,14 +42,15 @@ contract AutoManager is BaseLPManager, EIP712 {
         uint256 claimInterval;
         uint256 claimMinAmountUsd;
         address recipient;
-        AutoClaimType claimType;
         TransferInfoInToken transferType;
+        uint256 nonce;
     }
 
     struct AutoRebalanceRequest {
         uint256 positionId;
         uint160 triggerLower;
         uint160 triggerUpper;
+        uint256 nonce;
     }
 
     /* ============ Errors ============ */
@@ -64,84 +61,118 @@ contract AutoManager is BaseLPManager, EIP712 {
     /// @notice Thrown when the price is manipulated
     error PriceManipulation();
 
+    /// @notice Thrown when the nonce is invalid
+    error InvalidNonce();
+
+    /// @notice Thrown when the auto action is not needed
+    error NotNeededAutoAction();
+
     /* ============ CONSTANTS ============ */
 
     /// @notice Maximum allowed deviation from the trusted price (10%)
     uint32 public constant maxDeviation = 1000;
 
-    bytes32 constant AUTO_CLAIM_REQUEST_TYPEHASH = keccak256(
-        "AutoClaimRequest(uint256 positionId,uint256 initialTimestamp,uint256 claimInterval,uint256 claimMinAmountUsd,address recipient,uint8 claimType,uint8 transferType)"
+    bytes32 public constant AUTO_CLAIM_REQUEST_TYPEHASH = keccak256(
+        "AutoClaimRequest(uint256 positionId,uint256 initialTimestamp,uint256 claimInterval,uint256 claimMinAmountUsd,address recipient,uint8 transferType, uint256 nonce)"
     );
-    bytes32 constant AUTO_REBALANCE_REQUEST_TYPEHASH = keccak256(
-        "AutoRebalanceRequest(uint256 positionId,uint160 triggerLower,uint160 triggerUpper,int24 maxDeviation)"
-    );
-    bytes32 constant AUTO_CLOSE_REQUEST_TYPEHASH = keccak256(
-        "AutoCloseRequest(uint256 positionId,uint160 triggerPrice,bool belowOrAbove,address recipient,uint8 transferType)"
+    bytes32 public constant AUTO_REBALANCE_REQUEST_TYPEHASH =
+        keccak256("AutoRebalanceRequest(uint256 positionId,uint160 triggerLower,uint160 triggerUpper, uint256 nonce)");
+    bytes32 public constant AUTO_CLOSE_REQUEST_TYPEHASH = keccak256(
+        "AutoCloseRequest(uint256 positionId,uint160 triggerPrice,bool belowOrAbove,address recipient,uint8 transferType, uint256 nonce)"
     );
 
-    /* ============ IMMUTABLE VARIABLES ============ */
-
-    IAaveOracle public immutable aaveOracle;
-    uint256 public immutable baseCurrencyUnit;
+    bytes32 public constant AUTO_MANAGER_ROLE = keccak256("AUTO_MANAGER_ROLE");
 
     /* ============ STATE VARIABLES ============ */
 
+    IAaveOracle public aaveOracle;
+    uint256 public baseCurrencyUnit;
+
     mapping(uint256 positionId => uint256 timestamp) public lastAutoClaim;
+    mapping(address user => mapping(bytes32 digest => bool invalidated)) public digests;
 
     /* ============ CONSTRUCTOR ============ */
 
     constructor(
         INonfungiblePositionManager _positionManager,
         IProtocolFeeCollector _protocolFeeCollector,
-        IAaveOracle _aaveOracle
+        IAaveOracle _aaveOracle,
+        address admin,
+        address autoManager
     ) EIP712("AutoManager", "1") BaseLPManager(_positionManager, _protocolFeeCollector) {
         aaveOracle = _aaveOracle;
         baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(AUTO_MANAGER_ROLE, autoManager);
     }
 
     /* ============ EXTERNAL FUNCTIONS ============ */
 
     /**
-     * @notice Executes fee claim if `needClaimFees` returns true for the given request
+     * @notice Sets the Oracle that implements the IAaveOracle interface
+     * @param _aaveOracle The Oracle to set
+     */
+    function setAaveOracle(IAaveOracle _aaveOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        aaveOracle = _aaveOracle;
+        baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
+    }
+
+    /**
+     * @notice Invalidates a signature digest for the user
+     * @param digest The digest to invalidate. 
+     */
+    function invalidateDigest(bytes32 digest) external {
+        digests[msg.sender][digest] = true;
+    }
+
+    /**
+     * @notice Executes fee claim if `needsClaimFees` returns true for the given request
      * @param request Packed claim parameters and preferences
      * @param signature EIP-712 signature by the current position owner
      */
-    function autoClaimFees(AutoClaimRequest calldata request, bytes memory signature) external {
-        require(needClaimFees(request));
-        address signer =
-            _hashTypedDataV4(keccak256(abi.encode(AUTO_CLAIM_REQUEST_TYPEHASH, request))).recover(signature);
-        require(signer == positionManager.ownerOf(request.positionId), InvalidSignature());
+    function autoClaimFees(AutoClaimRequest calldata request, bytes memory signature)
+        external
+        onlyRole(AUTO_MANAGER_ROLE)
+    {
+        require(needsClaimFees(request), NotNeededAutoAction());
+        _validateSignatureFromOwner(
+            _hashTypedDataV4(keccak256(abi.encode(AUTO_CLAIM_REQUEST_TYPEHASH, request))), signature, request.positionId
+        );
         _claimFees(request.positionId, request.recipient, request.transferType);
         lastAutoClaim[request.positionId] = block.timestamp;
     }
 
     /**
-     * @notice Executes full withdrawal if `needClose` returns true for the given request
+     * @notice Executes full withdrawal if `needsClose` returns true for the given request
      * @param request Close parameters including trigger price and side
      * @param signature EIP-712 signature by the current position owner
      */
-    function autoClose(AutoCloseRequest calldata request, bytes memory signature) external {
-        require(needClose(request));
-        address signer =
-            _hashTypedDataV4(keccak256(abi.encode(AUTO_CLOSE_REQUEST_TYPEHASH, request))).recover(signature);
-        require(signer == positionManager.ownerOf(request.positionId), InvalidSignature());
-        _withdrawWithCollect(request.positionId, PRECISION, request.recipient, request.transferType);
+    function autoClose(AutoCloseRequest calldata request, bytes memory signature) external onlyRole(AUTO_MANAGER_ROLE) {
+        require(needsClose(request), NotNeededAutoAction());
+        address owner = _validateSignatureFromOwner(
+            _hashTypedDataV4(keccak256(abi.encode(AUTO_CLOSE_REQUEST_TYPEHASH, request))), signature, request.positionId
+        );
+        _withdrawAndChargeFee(request.positionId, PRECISION, request.recipient, request.transferType);
     }
 
     /**
-     * @notice Recenters position range if `needRebalance` returns true for the given request
+     * @notice Recenters position range if `needsRebalance` returns true for the given request
      * @param request Rebalance parameters including trigger bounds
      * @param signature EIP-712 signature by the current position owner
      */
-    function autoRebalance(AutoRebalanceRequest calldata request, bytes memory signature) external {
-        require(needRebalance(request));
-        address signer =
-            _hashTypedDataV4(keccak256(abi.encode(AUTO_REBALANCE_REQUEST_TYPEHASH, request))).recover(signature);
-        require(signer == positionManager.ownerOf(request.positionId), InvalidSignature());
+    function autoRebalance(AutoRebalanceRequest calldata request, bytes memory signature)
+        external
+        onlyRole(AUTO_MANAGER_ROLE)
+    {
+        require(needsRebalance(request), NotNeededAutoAction());
+        address owner = _validateSignatureFromOwner(
+            _hashTypedDataV4(keccak256(abi.encode(AUTO_REBALANCE_REQUEST_TYPEHASH, request))),
+            signature,
+            request.positionId
+        );
         PositionContext memory ctx = _getPositionContext(request.positionId);
         _checkPriceManipulation(ctx.poolInfo);
         (, int24 currentTick,,,,,) = IUniswapV3Pool(ctx.poolInfo.pool).slot0();
-        // Is it good method or we must change it?
         int24 newLower;
         int24 newUpper;
         {
@@ -152,8 +183,7 @@ contract AutoManager is BaseLPManager, EIP712 {
             newUpper = currentTick + widthTicks / 2;
             newUpper -= newUpper % tickSpacing;
         }
-        address _owner = positionManager.ownerOf(request.positionId);
-        _moveRange(request.positionId, newLower, newUpper, _owner, 0, _owner);
+        _moveRange(request.positionId, newLower, newUpper, owner, 0, owner);
     }
 
     /* ============ VIEW FUNCTIONS ============ */
@@ -163,15 +193,17 @@ contract AutoManager is BaseLPManager, EIP712 {
      * @param request Claim policy and thresholds
      * @return True if claim should be executed now
      */
-    function needClaimFees(AutoClaimRequest calldata request) public view returns (bool) {
-        if (
-            (request.claimType == AutoClaimType.TIME || request.claimType == AutoClaimType.BOTH)
-                && (request.initialTimestamp > lastAutoClaim[request.positionId]
-                                ? request.initialTimestamp
-                                : lastAutoClaim[request.positionId]) + request.claimInterval <= block.timestamp
-        ) {
-            return true;
-        } else if (request.claimType == AutoClaimType.AMOUNT || request.claimType == AutoClaimType.BOTH) {
+    function needsClaimFees(AutoClaimRequest calldata request) public view returns (bool) {
+        if ((request.initialTimestamp > 0 && request.claimInterval > 0)) {
+            uint256 nextClaimTimestamp =
+                (request.initialTimestamp > lastAutoClaim[request.positionId]
+                        ? request.initialTimestamp
+                        : lastAutoClaim[request.positionId]) + request.claimInterval;
+            if (nextClaimTimestamp <= block.timestamp) {
+                return true;
+            }
+        }
+        if (request.claimMinAmountUsd > 0) {
             PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
             (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesToUsd(poolInfo);
@@ -188,7 +220,7 @@ contract AutoManager is BaseLPManager, EIP712 {
      * @param request Close parameters including trigger and direction
      * @return True if close should be executed now
      */
-    function needClose(AutoCloseRequest memory request) public view returns (bool) {
+    function needsClose(AutoCloseRequest memory request) public view returns (bool) {
         PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
         uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(poolInfo.pool));
         return request.belowOrAbove ? currentSqrt <= request.triggerPrice : currentSqrt >= request.triggerPrice;
@@ -199,7 +231,7 @@ contract AutoManager is BaseLPManager, EIP712 {
      * @param request Rebalance parameters
      * @return True if rebalance should be executed now
      */
-    function needRebalance(AutoRebalanceRequest memory request) public view returns (bool) {
+    function needsRebalance(AutoRebalanceRequest memory request) public view returns (bool) {
         PositionContext memory ctx = _getPositionContext(request.positionId);
         uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
         if (currentSqrt > request.triggerUpper || currentSqrt < request.triggerLower) {
@@ -209,6 +241,23 @@ contract AutoManager is BaseLPManager, EIP712 {
     }
 
     /* ============ INTERNAL FUNCTIONS ============ */
+
+    /**
+     * @notice Validates the signature from the owner of the position
+     * @param digest The digest to validate
+     * @param signature The signature to validate
+     * @param positionId The id of the position
+     * @return owner The owner of the position
+     */
+    function _validateSignatureFromOwner(bytes32 digest, bytes memory signature, uint256 positionId)
+        internal
+        view
+        returns (address owner)
+    {
+        owner = positionManager.ownerOf(positionId);
+        require(digest.recover(signature) == owner, InvalidSignature());
+        require(!digests[owner][digest], InvalidNonce());
+    }
 
     /**
      * @notice Calculates the TWAP (Time-Weighted Average Price) of the Dex pool
@@ -282,7 +331,6 @@ contract AutoManager is BaseLPManager, EIP712 {
 
         if (price0 == 0) {
             if (price1 == 0) {
-                // check another oracles
                 revert("No price");
             } else {
                 uint256 twap = _getTwap(poolInfo.pool);
