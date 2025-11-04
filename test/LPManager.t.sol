@@ -205,9 +205,14 @@ abstract contract LPManagerTest is Test, DeployUtils {
         console.log("currentPrice", lpManager.getCurrentSqrtPriceX96(address(interactionInfo.pool)));
         vm.startPrank(interactionInfo.from);
         PreviewInfo memory previewCreatePosition;
-        (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) = lpManager.previewCreatePosition(
-            address(interactionInfo.pool), amountIn0_, amountIn1_, interactionInfo.tickLower, interactionInfo.tickUpper
-        );
+        (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) =
+            lpManager.previewCreatePosition(
+                address(interactionInfo.pool),
+                amountIn0_,
+                amountIn1_,
+                interactionInfo.tickLower,
+                interactionInfo.tickUpper
+            );
         uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         uint256 fee1 = protocolFeeCollector.calculateProtocolFee(amountIn1_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         vm.recordLogs();
@@ -226,9 +231,10 @@ abstract contract LPManagerTest is Test, DeployUtils {
             bytes32 sig = keccak256(bytes("PositionCreated(uint256,uint128,uint256,uint256,int24,int24,uint256)"));
             bool found;
             for (uint256 i; i < entries.length; i++) {
-                if (entries[i].emitter == address(lpManager)
-                    && entries[i].topics.length > 0
-                    && entries[i].topics[0] == sig) {
+                if (
+                    entries[i].emitter == address(lpManager) && entries[i].topics.length > 0
+                        && entries[i].topics[0] == sig
+                ) {
                     found = true;
                     break;
                 }
@@ -288,10 +294,10 @@ abstract contract LPManagerTest is Test, DeployUtils {
             bool found;
             bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
             for (uint256 i; i < entries.length; i++) {
-                if (entries[i].emitter == address(lpManager)
-                    && entries[i].topics.length > 1
-                    && entries[i].topics[0] == sig
-                    && entries[i].topics[1] == expectedId) {
+                if (
+                    entries[i].emitter == address(lpManager) && entries[i].topics.length > 1
+                        && entries[i].topics[0] == sig && entries[i].topics[1] == expectedId
+                ) {
                     found = true;
                     break;
                 }
@@ -331,10 +337,10 @@ abstract contract LPManagerTest is Test, DeployUtils {
                 bool found;
                 bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
                 for (uint256 i; i < entries.length; i++) {
-                    if (entries[i].emitter == address(lpManager)
-                        && entries[i].topics.length > 1
-                        && entries[i].topics[0] == sig
-                        && entries[i].topics[1] == expectedId) {
+                    if (
+                        entries[i].emitter == address(lpManager) && entries[i].topics.length > 1
+                            && entries[i].topics[0] == sig && entries[i].topics[1] == expectedId
+                    ) {
                         found = true;
                         break;
                     }
@@ -362,10 +368,10 @@ abstract contract LPManagerTest is Test, DeployUtils {
                 bool found;
                 bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
                 for (uint256 i; i < entries.length; i++) {
-                    if (entries[i].emitter == address(lpManager)
-                        && entries[i].topics.length > 1
-                        && entries[i].topics[0] == sig
-                        && entries[i].topics[1] == expectedId) {
+                    if (
+                        entries[i].emitter == address(lpManager) && entries[i].topics.length > 1
+                            && entries[i].topics[0] == sig && entries[i].topics[1] == expectedId
+                    ) {
                         found = true;
                         break;
                     }
@@ -402,10 +408,10 @@ abstract contract LPManagerTest is Test, DeployUtils {
             bool found;
             bytes32 expectedId = bytes32(uint256(interactionInfo.positionId));
             for (uint256 i; i < entries.length; i++) {
-                if (entries[i].emitter == address(lpManager)
-                    && entries[i].topics.length > 1
-                    && entries[i].topics[0] == sig
-                    && entries[i].topics[1] == expectedId) {
+                if (
+                    entries[i].emitter == address(lpManager) && entries[i].topics.length > 1
+                        && entries[i].topics[0] == sig && entries[i].topics[1] == expectedId
+                ) {
                     found = true;
                     break;
                 }
@@ -442,10 +448,10 @@ abstract contract LPManagerTest is Test, DeployUtils {
             bool found;
             bytes32 expectedOldId = bytes32(uint256(oldPositionId_));
             for (uint256 i; i < entries.length; i++) {
-                if (entries[i].emitter == address(lpManager)
-                    && entries[i].topics.length > 2
-                    && entries[i].topics[0] == sig
-                    && entries[i].topics[2] == expectedOldId) {
+                if (
+                    entries[i].emitter == address(lpManager) && entries[i].topics.length > 2
+                        && entries[i].topics[0] == sig && entries[i].topics[2] == expectedOldId
+                ) {
                     found = true;
                     break;
                 }

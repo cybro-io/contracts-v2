@@ -62,7 +62,13 @@ contract AutoManagerTest is Test, DeployUtils {
     function _deployAuto() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        autoManager = new AutoManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)), aaveOracle, address(admin), address(admin));
+        autoManager = new AutoManager(
+            positionManager,
+            IProtocolFeeCollector(address(protocolFeeCollector)),
+            aaveOracle,
+            address(admin),
+            address(admin)
+        );
         lpManager = new LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
     }
@@ -166,9 +172,14 @@ contract AutoManagerTest is Test, DeployUtils {
     {
         vm.startPrank(interactionInfo.from);
         PreviewInfo memory previewCreatePosition;
-        (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) = lpManager.previewCreatePosition(
-            address(interactionInfo.pool), amountIn0_, amountIn1_, interactionInfo.tickLower, interactionInfo.tickUpper
-        );
+        (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) =
+            lpManager.previewCreatePosition(
+                address(interactionInfo.pool),
+                amountIn0_,
+                amountIn1_,
+                interactionInfo.tickLower,
+                interactionInfo.tickUpper
+            );
         uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         uint256 fee1 = protocolFeeCollector.calculateProtocolFee(amountIn1_, ProtocolFeeCollector.FeeType.LIQUIDITY);
         vm.recordLogs();
@@ -187,9 +198,10 @@ contract AutoManagerTest is Test, DeployUtils {
             bytes32 sig = keccak256(bytes("PositionCreated(uint256,uint128,uint256,uint256,int24,int24,uint256)"));
             bool found;
             for (uint256 i; i < entries.length; i++) {
-                if (entries[i].emitter == address(lpManager)
-                    && entries[i].topics.length > 0
-                    && entries[i].topics[0] == sig) {
+                if (
+                    entries[i].emitter == address(lpManager) && entries[i].topics.length > 0
+                        && entries[i].topics[0] == sig
+                ) {
                     found = true;
                     break;
                 }
@@ -262,6 +274,13 @@ contract AutoManagerTest is Test, DeployUtils {
         bytes32 versionHash = keccak256(bytes("1"));
 
         return keccak256(abi.encode(typeHash, nameHash, versionHash, block.chainid, address(autoManager)));
+    }
+
+    function _testGetters() public {
+        vm.assertEq(address(autoManager.aaveOracle()), address(aaveOracle));
+        vm.assertEq(autoManager.baseCurrencyUnit(), aaveOracle.BASE_CURRENCY_UNIT());
+        vm.expectRevert();
+        autoManager.setAaveOracle(IAaveOracle(address(100010)));
     }
 
     function autoRebalance(
@@ -428,6 +447,7 @@ contract AutoManagerTestBaseChain is AutoManagerTest {
     function test2() public {
         // vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
         // vm.assume(amountIn1 < 8e11 && amountIn1 > 1e6);
+        _testGetters();
         (, int24 currentTick,,,,,) = pool.slot0();
         int24 tickSpacing = pool.tickSpacing();
         currentTick -= currentTick % tickSpacing;

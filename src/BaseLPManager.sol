@@ -169,12 +169,16 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
 
     /* ============ CONSTANTS ============ */
 
+    /// @notice Basis points precision used across the contract (1e4 = 100%)
     uint32 public constant PRECISION = 1e4;
 
     /* ============ IMMUTABLES ============ */
 
+    /// @notice Uniswap V3 NonfungiblePositionManager used for position operations
     INonfungiblePositionManager public immutable positionManager;
+    /// @notice External protocol fee collector used to compute and receive protocol fees
     IProtocolFeeCollector public immutable protocolFeeCollector;
+    /// @notice Uniswap V3 factory used to resolve pool addresses
     IUniswapV3Factory public immutable factory;
 
     constructor(INonfungiblePositionManager _positionManager, IProtocolFeeCollector _protocolFeeCollector) {
@@ -444,6 +448,19 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         );
     }
 
+    /**
+     * @notice Withdraws 100% from the current position and opens a new one with a different range
+     * @param positionId Position to migrate from
+     * @param newLower New lower tick
+     * @param newUpper New upper tick
+     * @param recipient Recipient of the new position NFT
+     * @param minLiquidity Minimal required liquidity for the new position
+     * @param sendBackTo Recipient for any unused token residuals
+     * @return newPositionId Newly created position id
+     * @return liquidity Minted liquidity in the new position
+     * @return amount0 Amount of token0 supplied into the new position
+     * @return amount1 Amount of token1 supplied into the new position
+     */
     function _moveRange(
         uint256 positionId,
         int24 newLower,
@@ -514,10 +531,22 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         if (amount1 > 0) IERC20Metadata(poolInfo.token1).safeTransfer(recipient, amount1);
     }
 
+    /**
+     * @notice Converts token1 amount to token0 units using sqrtPriceX96
+     * @param currentPrice Current sqrtPriceX96 of the pool
+     * @param amount1 Amount in token1
+     * @return amount1In0 Equivalent amount in token0 units
+     */
     function _oneToZero(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
         return FullMath.mulDiv(amount1, 2 ** 192, currentPrice * currentPrice);
     }
 
+    /**
+     * @notice Converts token0 amount to token1 units using sqrtPriceX96
+     * @param currentPrice Current sqrtPriceX96 of the pool
+     * @param amount0 Amount in token0
+     * @return amount0In1 Equivalent amount in token1 units
+     */
     function _zeroToOne(uint256 currentPrice, uint256 amount0) internal pure returns (uint256 amount0In1) {
         return FullMath.mulDiv(amount0, currentPrice * currentPrice, 2 ** 192);
     }

@@ -33,6 +33,11 @@ contract LPManager is BaseLPManager {
 
     /* ============ CONSTRUCTOR ============ */
 
+    /**
+     * @notice Initializes LPManager with Uniswap position manager and protocol fee collector
+     * @param _positionManager Uniswap V3 NonfungiblePositionManager
+     * @param _protocolFeeCollector Protocol fee collector
+     */
     constructor(INonfungiblePositionManager _positionManager, IProtocolFeeCollector _protocolFeeCollector)
         BaseLPManager(_positionManager, _protocolFeeCollector)
     {}
@@ -584,6 +589,17 @@ contract LPManager is BaseLPManager {
 
     /* ============ INTERNAL FUNCTIONS ============ */
 
+    /**
+     * @notice Internal helper to increase liquidity on a position
+     * @param positionId Position id
+     * @param ctx Position context (pool info and range)
+     * @param amount0 Amount of token0 available (post-fee if applicable)
+     * @param amount1 Amount of token1 available (post-fee if applicable)
+     * @param minLiquidity Minimal acceptable liquidity increase
+     * @return liquidity Resulting liquidity increase
+     * @return added0 Actual token0 added
+     * @return added1 Actual token1 added
+     */
     function _increaseLiquidity(
         uint256 positionId,
         PositionContext memory ctx,

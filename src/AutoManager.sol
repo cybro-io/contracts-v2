@@ -61,11 +61,14 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     /// @notice Thrown when the price is manipulated
     error PriceManipulation();
 
-    /// @notice Thrown when the nonce is invalid
-    error InvalidNonce();
+    /// @notice Thrown when the digest is invalidated
+    error InvalidDigest();
 
     /// @notice Thrown when the auto action is not needed
     error NotNeededAutoAction();
+
+    /// @notice Thrown when the price is not available
+    error NoPrice();
 
     /* ============ CONSTANTS ============ */
 
@@ -81,18 +84,31 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         "AutoCloseRequest(uint256 positionId,uint160 triggerPrice,bool belowOrAbove,address recipient,uint8 transferType, uint256 nonce)"
     );
 
+    /// @notice Role identifier allowed to execute automated flows (`auto*` functions)
     bytes32 public constant AUTO_MANAGER_ROLE = keccak256("AUTO_MANAGER_ROLE");
 
     /* ============ STATE VARIABLES ============ */
 
+    /// @notice External price oracle used to fetch asset prices
     IAaveOracle public aaveOracle;
+    /// @notice Base currency unit of the oracle (as returned by `IAaveOracle.BASE_CURRENCY_UNIT()`)
     uint256 public baseCurrencyUnit;
 
+    /// @notice Last successful auto-claim timestamp per position id
     mapping(uint256 positionId => uint256 timestamp) public lastAutoClaim;
+    /// @notice EIP-712 digest invalidation registry: true means signer revoked this digest
     mapping(address user => mapping(bytes32 digest => bool invalidated)) public digests;
 
     /* ============ CONSTRUCTOR ============ */
 
+    /**
+     * @notice Initializes the contract
+     * @param _positionManager Uniswap V3 NonfungiblePositionManager
+     * @param _protocolFeeCollector Protocol fee collector
+     * @param _aaveOracle Aave price oracle
+     * @param admin Address to be granted DEFAULT_ADMIN_ROLE
+     * @param autoManager Address to be granted AUTO_MANAGER_ROLE
+     */
     constructor(
         INonfungiblePositionManager _positionManager,
         IProtocolFeeCollector _protocolFeeCollector,
@@ -119,7 +135,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
 
     /**
      * @notice Invalidates a signature digest for the user
-     * @param digest The digest to invalidate. 
+     * @param digest The digest to invalidate.
      */
     function invalidateDigest(bytes32 digest) external {
         digests[msg.sender][digest] = true;
@@ -197,8 +213,8 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         if ((request.initialTimestamp > 0 && request.claimInterval > 0)) {
             uint256 nextClaimTimestamp =
                 (request.initialTimestamp > lastAutoClaim[request.positionId]
-                        ? request.initialTimestamp
-                        : lastAutoClaim[request.positionId]) + request.claimInterval;
+                            ? request.initialTimestamp
+                            : lastAutoClaim[request.positionId]) + request.claimInterval;
             if (nextClaimTimestamp <= block.timestamp) {
                 return true;
             }
@@ -256,7 +272,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     {
         owner = positionManager.ownerOf(positionId);
         require(digest.recover(signature) == owner, InvalidSignature());
-        require(!digests[owner][digest], InvalidNonce());
+        require(!digests[owner][digest], InvalidDigest());
     }
 
     /**
@@ -293,6 +309,12 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
     }
 
+    /// @notice Returns a "trusted" sqrtPriceX96 for the pool
+    /// @dev Pulls `price0` and `price1` from the Aave oracle. If either price is unavailable (zero),
+    ///      falls back to the pool 30‑minute TWAP. The formula computes sqrt(price1/price0) in Q96 and
+    ///      adjusts it by token decimals so that the result matches Uniswap V3 sqrtPriceX96 semantics.
+    /// @param poolInfo Pool metadata (tokens and fee)
+    /// @return trustedSqrtPrice Trusted sqrt price in Q96 format (sqrtPriceX96)
     function _getTrustedSqrtPrice(PoolInfo memory poolInfo) internal view returns (uint256 trustedSqrtPrice) {
         (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolInfo);
 
@@ -305,6 +327,15 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
                 * Math.sqrt(FullMath.mulDiv(decimals1, 2 ** 96, decimals0));
     }
 
+    /// @notice Fetches token prices from the Aave oracle and their decimal multipliers
+    /// @dev Prices are read via `IAaveOracle.getAssetPrice`
+    ///      On failure/missing feed the function does not revert — the corresponding price remains zero.
+    ///      Decimal multipliers are 10**decimals for each token and are used to align units.
+    /// @param poolInfo Pool metadata (tokens and fee)
+    /// @return price0 Token0 price in the oracle base
+    /// @return price1 Token1 price in the oracle base
+    /// @return decimals0 10**decimals(token0)
+    /// @return decimals1 10**decimals(token1)
     function _getPricesFromOracles(PoolInfo memory poolInfo)
         internal
         view
@@ -322,6 +353,18 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         decimals1 = 10 ** IERC20Metadata(poolInfo.token1).decimals();
     }
 
+    /// @notice Returns token prices in a unified base (e.g. USD), with TWAP-based fallback if one feed is missing
+    /// @dev If both Aave prices are available, they are returned as-is with decimal multipliers.
+    ///      If one token's price is missing (zero), it is derived from the other token's price and the current
+    ///      pool TWAP using the formulas:
+    ///        price0 ≈ (decimals0 * twap^2 / 2^192) * price1 / decimals1
+    ///        price1 ≈ (decimals1 * 2^192 / twap^2) * price0 / decimals0
+    ///      If both prices are missing, the function reverts with "No price".
+    /// @param poolInfo Pool metadata (tokens and fee)
+    /// @return price0 Token0 price in the oracle base (or TWAP-derived)
+    /// @return price1 Token1 price in the oracle base (or TWAP-derived)
+    /// @return decimals0 10**decimals(token0)
+    /// @return decimals1 10**decimals(token1)
     function _getPricesToUsd(PoolInfo memory poolInfo)
         internal
         view
@@ -331,7 +374,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
 
         if (price0 == 0) {
             if (price1 == 0) {
-                revert("No price");
+                revert NoPrice();
             } else {
                 uint256 twap = _getTwap(poolInfo.pool);
                 price0 = FullMath.mulDiv(FullMath.mulDiv(decimals0, twap * twap, 2 ** 192), price1, decimals1);
