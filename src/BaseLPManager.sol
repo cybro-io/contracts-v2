@@ -105,14 +105,16 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
 
     /* ============ EVENTS ============ */
 
-    /// @notice Emitted when a position is created
-    /// @param positionId Newly minted position NFT id
-    /// @param liquidity Minted liquidity value
-    /// @param amount0 Actual amount of token0 supplied
-    /// @param amount1 Actual amount of token1 supplied
-    /// @param tickLower Lower tick boundary
-    /// @param tickUpper Upper tick boundary
-    /// @param sqrtPriceX96 Current pool sqrt price (Q96) at creation
+    /**
+     * @notice Emitted when a position is created
+     * @param positionId Newly minted position NFT id
+     * @param liquidity Minted liquidity value
+     * @param amount0 Actual amount of token0 supplied
+     * @param amount1 Actual amount of token1 supplied
+     * @param tickLower Lower tick boundary
+     * @param tickUpper Upper tick boundary
+     * @param sqrtPriceX96 Current pool sqrt price (Q96) at creation
+     */
     event PositionCreated(
         uint256 indexed positionId,
         uint128 liquidity,

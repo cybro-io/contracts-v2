@@ -676,6 +676,17 @@ contract LPManagerTestArbitrum is LPManagerTest {
         newUpper = newLower + tickSpacing * (4000 / diff);
         baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
         vm.revertToState(snapshotId);
+
+        console.log("FIFTH TEST");
+
+        tickLower = TickMath.MIN_TICK - TickMath.MIN_TICK % tickSpacing;
+        tickUpper = -tickLower;
+        console.log("tickLower", tickLower);
+        console.log("tickUpper", tickUpper);
+        newLower = currentTick - tickSpacing * (30 / diff);
+        newUpper = newLower + tickSpacing * (4000 / diff);
+        baseline(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
     }
 }
 

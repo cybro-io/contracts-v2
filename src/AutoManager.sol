@@ -27,29 +27,52 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
 
     /* ============ TYPES ============ */
 
+    /// @notice EIP-712 typed request to automatically close a position by withdrawing 100%
+    /// @dev Triggers when current sqrtPriceX96 crosses the configured threshold
     struct AutoCloseRequest {
+        /// @notice Uniswap V3 position NFT id to operate on
         uint256 positionId;
+        /// @notice Sqrt price threshold in Q96 (sqrtPriceX96) to trigger close
         uint160 triggerPrice;
+        /// @notice Direction flag: true => trigger when current <= triggerPrice; false => when current >= triggerPrice
         bool belowOrAbove;
+        /// @notice Recipient of withdrawn tokens after protocol fees and optional internal swap
         address recipient;
+        /// @notice Transfer mode for outputs: BOTH, TOKEN0 or TOKEN1
         TransferInfoInToken transferType;
+        /// @notice Nonce to make the signed digest unique and prevent replay
         uint256 nonce;
     }
-
+    
+    /// @notice EIP-712 typed request to automatically claim fees for a position
+    /// @dev Can be time-based (interval) and/or amount-based (min value in oracle base)
     struct AutoClaimRequest {
+        /// @notice Position NFT id to claim fees from
         uint256 positionId;
+        /// @notice Baseline timestamp for scheduling periodic claims (used with claimInterval)
         uint256 initialTimestamp;
+        /// @notice Minimal seconds between successive auto-claims
         uint256 claimInterval;
+        /// @notice Minimal fees value to claim in oracle base currency (e.g., USD), scaled by IAaveOracle.BASE_CURRENCY_UNIT
         uint256 claimMinAmountUsd;
+        /// @notice Recipient of the claimed fees after protocol fee and optional swap
         address recipient;
+        /// @notice Transfer mode for outputs: BOTH, TOKEN0 or TOKEN1
         TransferInfoInToken transferType;
+        /// @notice Nonce to make the signed digest unique and prevent replay
         uint256 nonce;
     }
 
+    /// @notice EIP-712 typed request to automatically rebalance by recentring the position range
+    /// @dev Triggers when current sqrtPriceX96 is strictly below triggerLower or above triggerUpper
     struct AutoRebalanceRequest {
+        /// @notice Position NFT id to rebalance
         uint256 positionId;
+        /// @notice Lower sqrt price bound in Q96 (sqrtPriceX96) that triggers rebalance when crossed downward
         uint160 triggerLower;
+        /// @notice Upper sqrt price bound in Q96 (sqrtPriceX96) that triggers rebalance when crossed upward
         uint160 triggerUpper;
+        /// @notice Nonce to make the signed digest unique and prevent replay
         uint256 nonce;
     }
 
@@ -309,12 +332,14 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
     }
 
-    /// @notice Returns a "trusted" sqrtPriceX96 for the pool
-    /// @dev Pulls `price0` and `price1` from the Aave oracle. If either price is unavailable (zero),
-    ///      falls back to the pool 30‑minute TWAP. The formula computes sqrt(price1/price0) in Q96 and
-    ///      adjusts it by token decimals so that the result matches Uniswap V3 sqrtPriceX96 semantics.
-    /// @param poolInfo Pool metadata (tokens and fee)
-    /// @return trustedSqrtPrice Trusted sqrt price in Q96 format (sqrtPriceX96)
+    /**
+     * @notice Returns a "trusted" sqrtPriceX96 for the pool
+     * @dev Pulls `price0` and `price1` from the Aave oracle. If either price is unavailable (zero),
+     *      falls back to the pool 30‑minute TWAP. The formula computes sqrt(price1/price0) in Q96 and
+     *      adjusts it by token decimals so that the result matches Uniswap V3 sqrtPriceX96 semantics.
+     * @param poolInfo Pool metadata (tokens and fee)
+     * @return trustedSqrtPrice Trusted sqrt price in Q96 format (sqrtPriceX96)
+     */
     function _getTrustedSqrtPrice(PoolInfo memory poolInfo) internal view returns (uint256 trustedSqrtPrice) {
         (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolInfo);
 
@@ -327,15 +352,15 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
                 * Math.sqrt(FullMath.mulDiv(decimals1, 2 ** 96, decimals0));
     }
 
-    /// @notice Fetches token prices from the Aave oracle and their decimal multipliers
-    /// @dev Prices are read via `IAaveOracle.getAssetPrice`
-    ///      On failure/missing feed the function does not revert — the corresponding price remains zero.
-    ///      Decimal multipliers are 10**decimals for each token and are used to align units.
-    /// @param poolInfo Pool metadata (tokens and fee)
-    /// @return price0 Token0 price in the oracle base
-    /// @return price1 Token1 price in the oracle base
-    /// @return decimals0 10**decimals(token0)
-    /// @return decimals1 10**decimals(token1)
+    /**
+     * @notice Fetches token prices from the Aave oracle and their decimal multipliers
+     * @dev Prices are read via `IAaveOracle.getAssetPrice`
+     * @param poolInfo Pool metadata (tokens and fee)
+     * @return price0 Token0 price in the oracle base
+     * @return price1 Token1 price in the oracle base
+     * @return decimals0 10**decimals(token0)
+     * @return decimals1 10**decimals(token1)
+     */
     function _getPricesFromOracles(PoolInfo memory poolInfo)
         internal
         view
@@ -353,18 +378,19 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         decimals1 = 10 ** IERC20Metadata(poolInfo.token1).decimals();
     }
 
-    /// @notice Returns token prices in a unified base (e.g. USD), with TWAP-based fallback if one feed is missing
-    /// @dev If both Aave prices are available, they are returned as-is with decimal multipliers.
-    ///      If one token's price is missing (zero), it is derived from the other token's price and the current
-    ///      pool TWAP using the formulas:
-    ///        price0 ≈ (decimals0 * twap^2 / 2^192) * price1 / decimals1
-    ///        price1 ≈ (decimals1 * 2^192 / twap^2) * price0 / decimals0
-    ///      If both prices are missing, the function reverts with "No price".
-    /// @param poolInfo Pool metadata (tokens and fee)
-    /// @return price0 Token0 price in the oracle base (or TWAP-derived)
-    /// @return price1 Token1 price in the oracle base (or TWAP-derived)
-    /// @return decimals0 10**decimals(token0)
-    /// @return decimals1 10**decimals(token1)
+    /**
+     * @notice Returns token prices in a unified base (e.g. USD), with TWAP-based fallback if one feed is missing
+     * @dev If both Aave prices are available, they are returned as-is with decimal multipliers.
+     *      If one token's price is missing (zero), it is derived from the other token's price and the current
+     *      pool TWAP using the formulas:
+     *        price0 ≈ (decimals0 * twap^2 / 2^192) * price1 / decimals1
+     *        price1 ≈ (decimals1 * 2^192 / twap^2) * price0 / decimals0
+     * @param poolInfo Pool metadata (tokens and fee)
+     * @return price0 Token0 price in the oracle base (or TWAP-derived)
+     * @return price1 Token1 price in the oracle base (or TWAP-derived)
+     * @return decimals0 10**decimals(token0)
+     * @return decimals1 10**decimals(token1)
+     */
     function _getPricesToUsd(PoolInfo memory poolInfo)
         internal
         view
