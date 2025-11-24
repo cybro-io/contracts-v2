@@ -43,7 +43,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         /// @notice Nonce to make the signed digest unique and prevent replay
         uint256 nonce;
     }
-    
+
     /// @notice EIP-712 typed request to automatically claim fees for a position
     /// @dev Can be time-based (interval) and/or amount-based (min value in oracle base)
     struct AutoClaimRequest {

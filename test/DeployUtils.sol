@@ -8,6 +8,10 @@ import {Vm} from "forge-std/Vm.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 contract DeployUtils is StdCheats {
     using SafeERC20 for IERC20Metadata;
@@ -89,6 +93,22 @@ contract DeployUtils is StdCheats {
     IUniswapV3Pool usdc_weth_UNICHAIN = IUniswapV3Pool(address(0x8927058918e3CFf6F55EfE45A58db1be1F069E49));
     IUniswapV3Pool usdc_weth_005_UNICHAIN = IUniswapV3Pool(address(0x65081CB48d74A32e9CCfED75164b8c09972DBcF1));
     IUniswapV3Pool weth_wbtc_UNICHAIN = IUniswapV3Pool(address(0x1D6ae37DB0e36305019fB3d4bad2750B8784aDF9));
+
+    /* V4 */
+    IAllowanceTransfer permit2 = IAllowanceTransfer(address(0x000000000022D473030F116dDEE9F6B43aC78BA3));
+    IHooks constant HOOOKS_ADDRESS_ZERO = IHooks(address(0));
+
+    /* UNICHAIN */
+    IPoolManager poolManager_UNICHAIN = IPoolManager(address(0x1F98400000000000000000000000000000000004));
+    IPositionManager positionManager_UNICHAIN = IPositionManager(address(0x4529A01c7A0410167c5740C487A8DE60232617bf));
+
+    /* BASE */
+    IPoolManager poolManager_BASE = IPoolManager(address(0x498581fF718922c3f8e6A244956aF099B2652b2b));
+    IPositionManager positionManager_BASE = IPositionManager(address(0x7C5f5A4bBd8fD63184577525326123B519429bDc));
+
+    /* ARBITRUM */
+    IPoolManager poolManager_ARB = IPoolManager(address(0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32));
+    IPositionManager positionManager_ARB = IPositionManager(address(0xd88F38F930b7952f2DB2432Cb002E7abbF3dD869));
 
     /* ============ ASSET PROVIDERS ============ */
 
