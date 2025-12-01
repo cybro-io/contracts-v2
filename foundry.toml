@@ -5,7 +5,7 @@ libs = ["lib"]
 
 auto_detect_solc = true
 optimizer = true
-runs = 1000
+optimizer-runs = 1000
 
 remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
