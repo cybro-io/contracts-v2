@@ -511,10 +511,6 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         }
 
         vm.stopPrank();
-
-        uint128 liqAfter = positionManager.getPositionLiquidity(interactionInfo.positionId);
-        uint128 expectedDecrease = uint128(uint256(liqBefore) * percent / lpManager.PRECISION());
-        vm.assertApproxEqAbs(liqAfter, liqBefore - expectedDecrease, 1000);
     }
 
     function _assertApproxEqUint(uint256 expected, uint256 actual) internal view {

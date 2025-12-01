@@ -499,7 +499,7 @@ contract LPManagerV4 is IUnlockCallback {
     {
         PositionContext memory ctx = _getPositionContext(positionId);
         _setTransientBalances(_getBalanceBefore(ctx.poolKey.currency0), _getBalanceBefore(ctx.poolKey.currency1));
-        (uint256 amount0Collected, uint256 amount1Collected) = _withdrawAndChargeFeeInternal(positionId, PRECISION);
+        (uint256 amount0Collected, uint256 amount1Collected) = _withdraw(positionId, PRECISION);
 
         ctx.tickLower = newLower;
         ctx.tickUpper = newUpper;
@@ -556,12 +556,12 @@ contract LPManagerV4 is IUnlockCallback {
         PositionContext memory ctx = _getPositionContext(positionId);
         Prices memory prices = _currentLowerUpper(ctx);
 
-        (uint256 liq0, uint256 liq1) = LiquidityAmounts.getAmountsForLiquidity(
-            prices.current, prices.lower, prices.upper, _getTokenLiquidity(positionId) * percent / PRECISION
-        );
+        uint128 liquidityToRemove = uint128(_calculateLiquidityToRemove(positionId, ctx, percent));
+
+        (uint256 liq0, uint256 liq1) =
+            LiquidityAmounts.getAmountsForLiquidity(prices.current, prices.lower, prices.upper, liquidityToRemove);
         (uint256 fees0, uint256 fees1) = _previewCollect(positionId);
 
-        // we CAN NOT claim only part of the fees, we must claim all of them
         amount0 = liq0 + uint256(fees0);
         amount1 = liq1 + uint256(fees1);
     }
@@ -730,23 +730,9 @@ contract LPManagerV4 is IUnlockCallback {
         returns (uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = _collect(positionId);
-        PoolKey memory key = _getPoolKey(positionId);
-
-        amount0 = _collectProtocolFee(key.currency0, amount0, IProtocolFeeCollector.FeeType.FEES);
-        amount1 = _collectProtocolFee(key.currency1, amount1, IProtocolFeeCollector.FeeType.FEES);
-
-        if (transferInfo != TransferInfoInToken.BOTH) {
-            if (transferInfo == TransferInfoInToken.TOKEN0) {
-                amount0 += _swap(key, false, amount1);
-                amount1 = 0;
-            } else {
-                amount1 += _swap(key, true, amount0);
-                amount0 = 0;
-            }
-        }
-
-        _transfer(key.currency0, amount0, recipient);
-        _transfer(key.currency1, amount1, recipient);
+        _chargeFeeSwapTransfer(
+            amount0, amount1, positionId, transferInfo, IProtocolFeeCollector.FeeType.FEES, recipient
+        );
     }
 
     function _withdrawAndChargeFee(
@@ -755,11 +741,73 @@ contract LPManagerV4 is IUnlockCallback {
         address recipient,
         TransferInfoInToken transferInfo
     ) internal returns (uint256 amount0, uint256 amount1) {
-        (amount0, amount1) = _withdrawAndChargeFeeInternal(positionId, percent);
-        PoolKey memory key = _getPoolKey(positionId);
+        (amount0, amount1) = _withdraw(positionId, percent);
+        (amount0, amount1) = _chargeFeeSwapTransfer(
+            amount0, amount1, positionId, transferInfo, IProtocolFeeCollector.FeeType.LIQUIDITY, recipient
+        );
+    }
 
-        if (transferInfo != TransferInfoInToken.BOTH) {
-            if (transferInfo == TransferInfoInToken.TOKEN0) {
+    function _calculateLiquidityToRemove(uint256 positionId, PositionContext memory ctx, uint32 percent)
+        internal
+        view
+        returns (uint256 liquidity)
+    {
+        (uint128 positionLiquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128) = poolManager.getPositionInfo(
+            _toId(ctx.poolKey), address(positionManager), ctx.tickLower, ctx.tickUpper, bytes32(positionId)
+        );
+        if (percent == PRECISION) return positionLiquidity;
+        (uint256 fee0, uint256 fee1) = _calculateUnclaimedFees(
+            _toId(ctx.poolKey),
+            ctx.tickLower,
+            ctx.tickUpper,
+            positionLiquidity,
+            feeGrowthInside0LastX128,
+            feeGrowthInside1LastX128
+        );
+        Prices memory prices = _currentLowerUpper(ctx);
+        (uint256 targetAmount0, uint256 targetAmount1) =
+            LiquidityAmounts.getAmountsForLiquidity(prices.current, prices.lower, prices.upper, positionLiquidity);
+        liquidity = uint256(
+            LiquidityAmounts.getLiquidityForAmounts(
+                prices.current,
+                prices.lower,
+                prices.upper,
+                (targetAmount0 + fee0) * percent / PRECISION,
+                (targetAmount1 + fee1) * percent / PRECISION
+            )
+        );
+    }
+
+    function _withdraw(uint256 positionId, uint32 percent) internal returns (uint256 amount0, uint256 amount1) {
+        PositionContext memory ctx = _getPositionContext(positionId);
+        uint256 liquidityToRemove = _calculateLiquidityToRemove(positionId, ctx, percent);
+        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory params = new bytes[](2);
+        params[0] = abi.encode(positionId, liquidityToRemove, uint128(0), uint128(0), new bytes(0));
+        params[1] = abi.encode(ctx.poolKey.currency0, ctx.poolKey.currency1, address(this));
+
+        (uint256 bal0Before, uint256 bal1Before) = _getTransientBalances();
+
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
+
+        amount0 = _getBalance(ctx.poolKey.currency0) - bal0Before;
+        amount1 = _getBalance(ctx.poolKey.currency1) - bal1Before;
+    }
+
+    function _chargeFeeSwapTransfer(
+        uint256 amount0In,
+        uint256 amount1In,
+        uint256 positionId,
+        TransferInfoInToken transferInfoInToken,
+        IProtocolFeeCollector.FeeType feeType,
+        address recipient
+    ) internal returns (uint256 amount0, uint256 amount1) {
+        PoolKey memory key = _getPoolKey(positionId);
+        amount0 = _collectProtocolFee(key.currency0, amount0In, feeType);
+        amount1 = _collectProtocolFee(key.currency1, amount1In, feeType);
+
+        if (transferInfoInToken != TransferInfoInToken.BOTH) {
+            if (transferInfoInToken == TransferInfoInToken.TOKEN0) {
                 amount0 += _swap(key, false, amount1);
                 amount1 = 0;
             } else {
@@ -770,35 +818,6 @@ contract LPManagerV4 is IUnlockCallback {
 
         _transfer(key.currency0, amount0, recipient);
         _transfer(key.currency1, amount1, recipient);
-    }
-
-    function _withdrawAndChargeFeeInternal(uint256 positionId, uint32 percent)
-        internal
-        returns (uint256 amount0, uint256 amount1)
-    {
-        PoolKey memory key = _getPoolKey(positionId);
-
-        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(
-            positionId,
-            uint256(_getTokenLiquidity(positionId) * percent / PRECISION),
-            uint128(0),
-            uint128(0),
-            new bytes(0)
-        );
-        params[1] = abi.encode(key.currency0, key.currency1, address(this));
-
-        (uint256 bal0Before, uint256 bal1Before) = _getTransientBalances();
-
-        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
-
-        amount0 = _collectProtocolFee(
-            key.currency0, _getBalance(key.currency0) - bal0Before, IProtocolFeeCollector.FeeType.LIQUIDITY
-        );
-        amount1 = _collectProtocolFee(
-            key.currency1, _getBalance(key.currency1) - bal1Before, IProtocolFeeCollector.FeeType.LIQUIDITY
-        );
     }
 
     // Wrapper for _swapWithPriceLimit to do simple exact input swap
