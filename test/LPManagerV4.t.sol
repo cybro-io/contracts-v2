@@ -209,6 +209,19 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         console.log("\nFEES COMPOUNDED\n");
         _movePoolPrice();
 
+        uint256 snapshotId = vm.snapshot();
+
+        claimFees(0, 0, LPManagerV4.TransferInfoInToken.TOKEN0);
+        console.log("\nFEES CLAIMED in Token0\n");
+        vm.revertTo(snapshotId);
+
+        claimFees(0, 0, LPManagerV4.TransferInfoInToken.TOKEN1);
+        console.log("\nFEES CLAIMED in Token1\n");
+        vm.revertTo(snapshotId);
+
+        claimFees(0, 0, LPManagerV4.TransferInfoInToken.BOTH);
+        console.log("\nFEES CLAIMED in Both Tokens\n");
+
         withdraw(5000, 0, 0, LPManagerV4.TransferInfoInToken.BOTH);
         console.log("\nWITHDRAWN 50%\n");
         withdraw(2500, 0, 0, LPManagerV4.TransferInfoInToken.TOKEN0);

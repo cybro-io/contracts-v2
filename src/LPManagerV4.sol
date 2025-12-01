@@ -602,7 +602,6 @@ contract LPManagerV4 is IUnlockCallback {
         (amount0, amount1) = _toOptimalRatio(ctx, amount0, amount1);
 
         liquidity = _getLiquidityForAmounts(ctx, amount0, amount1);
-        // TODO: move check to after minting
         if (liquidity < minLiquidity) revert LiquidityLessThanMin();
 
         _approvePermit2(ctx.poolKey.currency0, amount0);
@@ -730,7 +729,7 @@ contract LPManagerV4 is IUnlockCallback {
         returns (uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = _collect(positionId);
-        _chargeFeeSwapTransfer(
+        (amount0, amount1) = _chargeFeeSwapTransfer(
             amount0, amount1, positionId, transferInfo, IProtocolFeeCollector.FeeType.FEES, recipient
         );
     }
