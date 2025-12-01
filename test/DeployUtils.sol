@@ -74,6 +74,7 @@ contract DeployUtils is StdCheats {
     IERC20Metadata usdc_UNICHAIN = IERC20Metadata(address(0x078D782b760474a361dDA0AF3839290b0EF57AD6));
     IERC20Metadata weth_UNICHAIN = IERC20Metadata(address(0x4200000000000000000000000000000000000006));
     IERC20Metadata wbtc_UNICHAIN = IERC20Metadata(address(0x927B51f251480a681271180DA4de28D44EC4AfB8));
+    IERC20Metadata WBTC_oft_UNICHAIN = IERC20Metadata(address(0x0555E30da8f98308EdB960aa94C0Db47230d2B9c));
 
     /* ============ POOLS ============ */
 
@@ -133,7 +134,11 @@ contract DeployUtils is StdCheats {
             token.safeTransfer(to, amount);
             vm.stopPrank();
         } else {
-            deal(address(token), to, amount);
+            if (address(token) == address(0)) {
+                deal(to, amount);
+            } else {
+                deal(address(token), to, amount);
+            }
         }
     }
 }
