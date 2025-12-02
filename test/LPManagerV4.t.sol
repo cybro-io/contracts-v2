@@ -254,7 +254,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
                     ? amountIn0_
                     : interactionInfo.poolKey.currency1 == address(0) ? amountIn1_ : 0
             }(
-                _cast(interactionInfo.poolKey).toId(),
+                interactionInfo.poolKey,
                 amountIn0_,
                 amountIn1_,
                 interactionInfo.tickLower,
@@ -283,7 +283,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
 
         {
             Vm.Log[] memory entries = vm.getRecordedLogs();
-            bytes32 sig = keccak256(bytes("PositionCreated(uint256,uint128,uint256,uint256,int24,int24)"));
+            bytes32 sig = keccak256(bytes("PositionCreated(uint256,uint128,uint256,uint256,int24,int24,uint256)"));
             bool found;
             for (uint256 i; i < entries.length; i++) {
                 if (entries[i].emitter == address(lpManager) && entries[i].topics[0] == sig) {
