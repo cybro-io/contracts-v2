@@ -98,9 +98,8 @@ contract LPManagerV4 is IUnlockCallback {
     uint8 internal constant CALLBACK_ACTION_SWAP = 1;
     uint256 internal constant MASK_UPPER_200_BITS = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000;
 
-    // Transient storage slots for balancing accounting
-    bytes32 internal constant BAL0_BEFORE_SLOT = keccak256("LPManagerV4.bal0_before");
-    bytes32 internal constant BAL1_BEFORE_SLOT = keccak256("LPManagerV4.bal1_before");
+    uint256 transient balance0;
+    uint256 transient balance1;
 
     /* ============ CONSTANTS ============ */
 
@@ -350,7 +349,8 @@ contract LPManagerV4 is IUnlockCallback {
         address recipient,
         uint256 minLiquidity
     ) public payable returns (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) {
-        _setTransientBalances(_getBalanceBefore(key.currency0), _getBalanceBefore(key.currency1));
+        balance0 = _getBalanceBefore(key.currency0);
+        balance1 = _getBalanceBefore(key.currency1);
         if (amountIn0 > 0) _pullToken(key.currency0, amountIn0);
         if (amountIn1 > 0) _pullToken(key.currency1, amountIn1);
 
@@ -394,7 +394,8 @@ contract LPManagerV4 is IUnlockCallback {
         PoolKey memory key = _getPoolKey(positionId);
 
         // Store balances before pulling tokens to calculate usage later
-        _setTransientBalances(_getBalanceBefore(key.currency0), _getBalanceBefore(key.currency1));
+        balance0 = _getBalanceBefore(key.currency0);
+        balance1 = _getBalanceBefore(key.currency1);
 
         if (amountIn0 > 0) _pullToken(key.currency0, amountIn0);
         if (amountIn1 > 0) _pullToken(key.currency1, amountIn1);
@@ -415,7 +416,8 @@ contract LPManagerV4 is IUnlockCallback {
         uint256 minAmountOut1
     ) external onlyPositionOwner(positionId) returns (uint256 amount0, uint256 amount1) {
         PoolKey memory key = _getPoolKey(positionId);
-        _setTransientBalances(_getBalanceBefore(key.currency0), _getBalanceBefore(key.currency1));
+        balance0 = _getBalanceBefore(key.currency0);
+        balance1 = _getBalanceBefore(key.currency1);
         (amount0, amount1) = _withdrawAndChargeFee(positionId, percent, recipient, TransferInfoInToken.BOTH);
         require(amount0 >= minAmountOut0, Amount0LessThanMin());
         require(amount1 >= minAmountOut1, Amount1LessThanMin());
@@ -428,7 +430,8 @@ contract LPManagerV4 is IUnlockCallback {
         returns (uint256 amountOut)
     {
         PoolKey memory key = _getPoolKey(positionId);
-        _setTransientBalances(_getBalanceBefore(key.currency0), _getBalanceBefore(key.currency1));
+        balance0 = _getBalanceBefore(key.currency0);
+        balance1 = _getBalanceBefore(key.currency1);
         TransferInfoInToken transferInfo;
         if (tokenOut == key.currency0) {
             transferInfo = TransferInfoInToken.TOKEN0;
@@ -498,7 +501,8 @@ contract LPManagerV4 is IUnlockCallback {
         returns (uint256 newPositionId, uint128 liquidity, uint256 amount0, uint256 amount1)
     {
         PositionContext memory ctx = _getPositionContext(positionId);
-        _setTransientBalances(_getBalanceBefore(ctx.poolKey.currency0), _getBalanceBefore(ctx.poolKey.currency1));
+        balance0 = _getBalanceBefore(ctx.poolKey.currency0);
+        balance1 = _getBalanceBefore(ctx.poolKey.currency1);
         (uint256 amount0Collected, uint256 amount1Collected) = _withdraw(positionId, PRECISION);
 
         ctx.tickLower = newLower;
@@ -645,10 +649,8 @@ contract LPManagerV4 is IUnlockCallback {
         }
         positionId = positionManager.nextTokenId() - 1;
 
-        (uint256 balanceBefore0, uint256 balanceBefore1) = _getTransientBalances();
-
-        amount0Used = amount0 + balanceBefore0 - _getBalance(ctx.poolKey.currency0);
-        amount1Used = amount1 + balanceBefore1 - _getBalance(ctx.poolKey.currency1);
+        amount0Used = amount0 + balance0 - _getBalance(ctx.poolKey.currency0);
+        amount1Used = amount1 + balance1 - _getBalance(ctx.poolKey.currency1);
 
         _sendBackRemainingTokens(
             ctx.poolKey.currency0, ctx.poolKey.currency1, amount0 - amount0Used, amount1 - amount1Used, sendBackTo
@@ -697,9 +699,8 @@ contract LPManagerV4 is IUnlockCallback {
                 abi.encode(actions, params), block.timestamp
             );
         }
-        (uint256 balanceBefore0, uint256 balanceBefore1) = _getTransientBalances();
-        amount0Used = amount0 + balanceBefore0 - _getBalance(ctx.poolKey.currency0);
-        amount1Used = amount1 + balanceBefore1 - _getBalance(ctx.poolKey.currency1);
+        amount0Used = amount0 + balance0 - _getBalance(ctx.poolKey.currency0);
+        amount1Used = amount1 + balance1 - _getBalance(ctx.poolKey.currency1);
 
         _sendBackRemainingTokens(
             ctx.poolKey.currency0, ctx.poolKey.currency1, amount0 - amount0Used, amount1 - amount1Used, msg.sender
@@ -715,13 +716,13 @@ contract LPManagerV4 is IUnlockCallback {
         PoolKey memory key = _getPoolKey(positionId);
         params[1] = abi.encode(key.currency0, key.currency1, address(this));
 
-        uint256 bal0Before = _getBalance(key.currency0);
-        uint256 bal1Before = _getBalance(key.currency1);
+        balance0 = _getBalanceBefore(key.currency0);
+        balance1 = _getBalanceBefore(key.currency1);
 
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
 
-        amount0 = _getBalance(key.currency0) - bal0Before;
-        amount1 = _getBalance(key.currency1) - bal1Before;
+        amount0 = _getBalance(key.currency0) - balance0;
+        amount1 = _getBalance(key.currency1) - balance1;
     }
 
     function _claimFees(uint256 positionId, address recipient, TransferInfoInToken transferInfo)
@@ -785,12 +786,10 @@ contract LPManagerV4 is IUnlockCallback {
         params[0] = abi.encode(positionId, liquidityToRemove, uint128(0), uint128(0), new bytes(0));
         params[1] = abi.encode(ctx.poolKey.currency0, ctx.poolKey.currency1, address(this));
 
-        (uint256 bal0Before, uint256 bal1Before) = _getTransientBalances();
-
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
 
-        amount0 = _getBalance(ctx.poolKey.currency0) - bal0Before;
-        amount1 = _getBalance(ctx.poolKey.currency1) - bal1Before;
+        amount0 = _getBalance(ctx.poolKey.currency0) - balance0;
+        amount1 = _getBalance(ctx.poolKey.currency1) - balance1;
     }
 
     function _chargeFeeSwapTransfer(
@@ -910,16 +909,7 @@ contract LPManagerV4 is IUnlockCallback {
     {
         if (amount == 0) return 0;
         uint256 fee = protocolFeeCollector.calculateProtocolFee(amount, feeType);
-        if (fee > 0) {
-            if (token == address(0)) {
-                (bool success,) = address(protocolFeeCollector).call{value: fee}("");
-                if (!success) {
-                    revert ProtocolFeeCollector__EthTransferFailed();
-                }
-            } else {
-                IERC20Metadata(token).safeTransfer(address(protocolFeeCollector), fee);
-            }
-        }
+        _transfer(token, fee, address(protocolFeeCollector));
         return amount - fee;
     }
 
@@ -1102,24 +1092,6 @@ contract LPManagerV4 is IUnlockCallback {
 
     function _toId(PoolKey memory key) internal pure returns (PoolId) {
         return PoolId.wrap(keccak256(abi.encode(key)));
-    }
-
-    function _setTransientBalances(uint256 b0, uint256 b1) internal {
-        bytes32 slot0 = BAL0_BEFORE_SLOT;
-        bytes32 slot1 = BAL1_BEFORE_SLOT;
-        assembly {
-            tstore(slot0, b0)
-            tstore(slot1, b1)
-        }
-    }
-
-    function _getTransientBalances() internal view returns (uint256 b0, uint256 b1) {
-        bytes32 slot0 = BAL0_BEFORE_SLOT;
-        bytes32 slot1 = BAL1_BEFORE_SLOT;
-        assembly {
-            b0 := tload(slot0)
-            b1 := tload(slot1)
-        }
     }
 
     function _getPriceFromPool(PoolId poolId, address token0, address token1) internal view returns (uint256 price) {
