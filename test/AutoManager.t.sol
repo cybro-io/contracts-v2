@@ -76,13 +76,7 @@ contract AutoManagerTest is Test, DeployUtils {
     function _provideAndApproveSpecific(bool needToProvide, IERC20Metadata asset_, uint256 amount_, address user_)
         internal
     {
-        if (needToProvide) {
-            dealTokens(asset_, user_, amount_);
-        }
-        vm.startPrank(user_);
-        asset_.forceApprove(address(lpManager), amount_);
-        asset_.forceApprove(address(autoManager), amount_);
-        vm.stopPrank();
+        _provideAndApproveSpecific(needToProvide, asset_, amount_, user_, address(lpManager), address(autoManager));
     }
 
     // TESTS
@@ -132,7 +126,7 @@ contract AutoManagerTest is Test, DeployUtils {
         return FullMath.mulDiv(amount1, 2 ** 192, uint256(currentPrice) * uint256(currentPrice));
     }
 
-    function _intializePosition(
+    function _initializePosition(
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
@@ -293,7 +287,7 @@ contract AutoManagerTest is Test, DeployUtils {
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
+        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerLower = TickMath.getSqrtRatioAtTick(currentTick - 10 * pool_.tickSpacing());
         uint160 triggerUpper = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
@@ -335,7 +329,7 @@ contract AutoManagerTest is Test, DeployUtils {
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
+        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         // claim type TIME
         AutoManager.AutoClaimRequest memory request = AutoManager.AutoClaimRequest({
             positionId: interactionInfo.positionId,
@@ -400,7 +394,7 @@ contract AutoManagerTest is Test, DeployUtils {
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
+        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerPrice = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
         AutoManager.AutoCloseRequest memory request = AutoManager.AutoCloseRequest({

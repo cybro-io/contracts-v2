@@ -141,4 +141,27 @@ contract DeployUtils is StdCheats {
             }
         }
     }
+
+    function _provideAndApproveSpecific(
+        bool needToProvide,
+        IERC20Metadata asset_,
+        uint256 amount_,
+        address user_,
+        address lpManager_,
+        address autoManager_
+    ) internal {
+        if (address(asset_) == address(0)) {
+            deal(user_, amount_);
+        } else {
+            if (needToProvide) {
+                dealTokens(asset_, user_, amount_);
+            }
+            vm.startPrank(user_);
+            asset_.forceApprove(lpManager_, amount_);
+            if (autoManager_ != address(0)) {
+                asset_.forceApprove(autoManager_, amount_);
+            }
+            vm.stopPrank();
+        }
+    }
 }

@@ -69,12 +69,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
     function _provideAndApproveSpecific(bool needToProvide, IERC20Metadata asset_, uint256 amount_, address user_)
         internal
     {
-        if (needToProvide) {
-            dealTokens(asset_, user_, amount_);
-        }
-        vm.startPrank(user_);
-        asset_.forceApprove(address(lpManager), amount_);
-        vm.stopPrank();
+        _provideAndApproveSpecific(needToProvide, asset_, amount_, user_, address(lpManager), address(0));
     }
 
     // TESTS

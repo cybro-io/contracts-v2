@@ -11,9 +11,13 @@ import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {IAaveOracle} from "./interfaces/IAaveOracle.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {BaseLPManager} from "./BaseLPManager.sol";
+import {BaseLPManagerV4} from "./BaseLPManagerV4.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 /**
  * @title AutoManager
@@ -21,9 +25,10 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
  * @dev Verifies EIP712 signed intents by the position owner, evaluates on-chain conditions (price, fees, time) and
  *      executes flows inherited from BaseLPManager.
  */
-contract AutoManager is BaseLPManager, EIP712, AccessControl {
+contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     using SafeERC20 for IERC20Metadata;
     using ECDSA for bytes32;
+    using StateLibrary for IPoolManager;
 
     /* ============ TYPES ============ */
 
@@ -126,19 +131,21 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
 
     /**
      * @notice Initializes the contract
-     * @param _positionManager Uniswap V3 NonfungiblePositionManager
+     * @param _poolManager Pool manager
+     * @param _positionManager Position manager
      * @param _protocolFeeCollector Protocol fee collector
      * @param _aaveOracle Aave price oracle
      * @param admin Address to be granted DEFAULT_ADMIN_ROLE
      * @param autoManager Address to be granted AUTO_MANAGER_ROLE
      */
     constructor(
-        INonfungiblePositionManager _positionManager,
+        IPoolManager _poolManager,
+        IPositionManager _positionManager,
         IProtocolFeeCollector _protocolFeeCollector,
         IAaveOracle _aaveOracle,
         address admin,
         address autoManager
-    ) EIP712("AutoManager", "1") BaseLPManager(_positionManager, _protocolFeeCollector) {
+    ) EIP712("AutoManagerV4", "1") BaseLPManagerV4(_poolManager, _positionManager, _protocolFeeCollector) {
         aaveOracle = _aaveOracle;
         baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -210,17 +217,16 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
             request.positionId
         );
         PositionContext memory ctx = _getPositionContext(request.positionId);
-        _checkPriceManipulation(ctx.poolInfo);
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(ctx.poolInfo.pool).slot0();
+        _checkPriceManipulation(ctx.poolKey);
+        (, int24 currentTick,,) = poolManager.getSlot0(_toId(ctx.poolKey));
         int24 newLower;
         int24 newUpper;
         {
-            int24 tickSpacing = IUniswapV3Pool(ctx.poolInfo.pool).tickSpacing();
             int24 widthTicks = ctx.tickUpper - ctx.tickLower;
             newLower = currentTick - widthTicks / 2;
-            newLower -= newLower % tickSpacing;
+            newLower -= newLower % ctx.poolKey.tickSpacing;
             newUpper = currentTick + widthTicks / 2;
-            newUpper -= newUpper % tickSpacing;
+            newUpper -= newUpper % ctx.poolKey.tickSpacing;
         }
         _moveRange(request.positionId, newLower, newUpper, owner, 0, owner);
     }
@@ -243,9 +249,9 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
             }
         }
         if (request.claimMinAmountUsd > 0) {
-            PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
+            PoolKey memory poolKey = _getPoolKey(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
-            (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesToUsd(poolInfo);
+            (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
 
             uint256 feesUsd = FullMath.mulDiv(fees0, price0, decimals0) + FullMath.mulDiv(fees1, price1, decimals1);
 
@@ -260,8 +266,8 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      * @return True if close should be executed now
      */
     function needsClose(AutoCloseRequest memory request) public view returns (bool) {
-        PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
-        uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(poolInfo.pool));
+        PoolKey memory poolKey = _getPoolKey(request.positionId);
+        uint160 currentSqrt = getCurrentSqrtPriceX96(poolKey);
         return request.belowOrAbove ? currentSqrt <= request.triggerPrice : currentSqrt >= request.triggerPrice;
     }
 
@@ -272,7 +278,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      */
     function needsRebalance(AutoRebalanceRequest memory request) public view returns (bool) {
         PositionContext memory ctx = _getPositionContext(request.positionId);
-        uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
+        uint160 currentSqrt = getCurrentSqrtPriceX96(ctx.poolKey);
         if (currentSqrt > request.triggerUpper || currentSqrt < request.triggerLower) {
             return true;
         }
@@ -293,42 +299,19 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         view
         returns (address owner)
     {
-        owner = positionManager.ownerOf(positionId);
+        owner = IERC721(address(positionManager)).ownerOf(positionId);
         require(digest.recover(signature) == owner, InvalidSignature());
         require(!digests[owner][digest], InvalidDigest());
     }
 
     /**
-     * @notice Calculates the TWAP (Time-Weighted Average Price) of the Dex pool
-     * @dev This function calculates the average price of the Dex pool over a last 30 minutes
-     * @param pool The address of the pool
-     * @return The TWAP of the Dex pool
-     */
-    function _getTwap(address pool) internal view returns (uint256) {
-        uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = 0;
-        secondsAgos[1] = 1800;
-
-        (int56[] memory tickCumulatives,) = IUniswapV3Pool(pool).observe(secondsAgos);
-        int56 tickCumulativeDelta = tickCumulatives[0] - tickCumulatives[1];
-        int56 timeElapsed = int56(uint56(secondsAgos[1]));
-
-        int24 averageTick = int24(tickCumulativeDelta / timeElapsed);
-        if (tickCumulativeDelta < 0 && (tickCumulativeDelta % timeElapsed != 0)) {
-            averageTick--;
-        }
-
-        return uint256(TickMath.getSqrtRatioAtTick(averageTick));
-    }
-
-    /**
      * @notice Function to check if the price of the Dex pool is being manipulated
-     * @param poolInfo Pool info
+     * @param poolKey Pool key
      */
-    function _checkPriceManipulation(PoolInfo memory poolInfo) internal view {
-        uint256 trustedSqrtPrice = _getTrustedSqrtPrice(poolInfo);
-        uint256 currentSqrtPrice = getCurrentSqrtPriceX96(poolInfo.pool);
-        uint256 deviation = FullMath.mulDiv(currentSqrtPrice ** 2, PRECISION, trustedSqrtPrice ** 2);
+    function _checkPriceManipulation(PoolKey memory poolKey) internal view {
+        uint256 deviation = FullMath.mulDiv(
+            uint256(getCurrentSqrtPriceX96(poolKey)) ** 2, PRECISION, _getTrustedSqrtPrice(poolKey) ** 2
+        );
         require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
     }
 
@@ -337,77 +320,43 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      * @dev Pulls `price0` and `price1` from the Aave oracle. If either price is unavailable (zero),
      *      falls back to the pool 30‑minute TWAP. The formula computes sqrt(price1/price0) in Q96 and
      *      adjusts it by token decimals so that the result matches Uniswap V3 sqrtPriceX96 semantics.
-     * @param poolInfo Pool metadata (tokens and fee)
+     * @param poolKey Pool key
      * @return trustedSqrtPrice Trusted sqrt price in Q96 format (sqrtPriceX96)
      */
-    function _getTrustedSqrtPrice(PoolInfo memory poolInfo) internal view returns (uint256 trustedSqrtPrice) {
-        (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolInfo);
+    function _getTrustedSqrtPrice(PoolKey memory poolKey) internal view returns (uint256 trustedSqrtPrice) {
+        (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
 
-        if (price0 == 0 || price1 == 0) {
-            return _getTwap(poolInfo.pool);
-        }
-
-        return
-            Math.sqrt(FullMath.mulDiv(price0, 2 ** 96, price1))
-                * Math.sqrt(FullMath.mulDiv(decimals1, 2 ** 96, decimals0));
+        trustedSqrtPrice = Math.sqrt(FullMath.mulDiv(price0, 2 ** 96, price1))
+            * Math.sqrt(FullMath.mulDiv(decimals1, 2 ** 96, decimals0));
     }
 
     /**
      * @notice Fetches token prices from the Aave oracle and their decimal multipliers
      * @dev Prices are read via `IAaveOracle.getAssetPrice`
-     * @param poolInfo Pool metadata (tokens and fee)
+     * @param poolKey Pool key
      * @return price0 Token0 price in the oracle base
      * @return price1 Token1 price in the oracle base
      * @return decimals0 10**decimals(token0)
      * @return decimals1 10**decimals(token1)
      */
-    function _getPricesFromOracles(PoolInfo memory poolInfo)
+    function _getPricesFromOracles(PoolKey memory poolKey)
         internal
         view
         returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
     {
-        try aaveOracle.getAssetPrice(poolInfo.token0) returns (uint256 price0_) {
+        try aaveOracle.getAssetPrice(poolKey.currency0) returns (uint256 price0_) {
             price0 = price0_;
-        } catch {}
-
-        try aaveOracle.getAssetPrice(poolInfo.token1) returns (uint256 price1_) {
-            price1 = price1_;
-        } catch {}
-
-        decimals0 = 10 ** IERC20Metadata(poolInfo.token0).decimals();
-        decimals1 = 10 ** IERC20Metadata(poolInfo.token1).decimals();
-    }
-
-    /**
-     * @notice Returns token prices in a unified base (e.g. USD), with TWAP-based fallback if one feed is missing
-     * @dev If both Aave prices are available, they are returned as-is with decimal multipliers.
-     *      If one token's price is missing (zero), it is derived from the other token's price and the current
-     *      pool TWAP using the formulas:
-     *        price0 ≈ (decimals0 * twap^2 / 2^192) * price1 / decimals1
-     *        price1 ≈ (decimals1 * 2^192 / twap^2) * price0 / decimals0
-     * @param poolInfo Pool metadata (tokens and fee)
-     * @return price0 Token0 price in the oracle base (or TWAP-derived)
-     * @return price1 Token1 price in the oracle base (or TWAP-derived)
-     * @return decimals0 10**decimals(token0)
-     * @return decimals1 10**decimals(token1)
-     */
-    function _getPricesToUsd(PoolInfo memory poolInfo)
-        internal
-        view
-        returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
-    {
-        (price0, price1, decimals0, decimals1) = _getPricesFromOracles(poolInfo);
-
-        if (price0 == 0) {
-            if (price1 == 0) {
-                revert NoPrice();
-            } else {
-                uint256 twap = _getTwap(poolInfo.pool);
-                price0 = FullMath.mulDiv(FullMath.mulDiv(decimals0, twap * twap, 2 ** 192), price1, decimals1);
-            }
-        } else if (price1 == 0) {
-            uint256 twap = _getTwap(poolInfo.pool);
-            price1 = FullMath.mulDiv(FullMath.mulDiv(decimals1, 2 ** 192, twap * twap), price0, decimals0);
+        } catch {
+            revert NoPrice();
         }
+
+        try aaveOracle.getAssetPrice(poolKey.currency1) returns (uint256 price1_) {
+            price1 = price1_;
+        } catch {
+            revert NoPrice();
+        }
+
+        decimals0 = 10 ** IERC20Metadata(poolKey.currency0).decimals();
+        decimals1 = 10 ** IERC20Metadata(poolKey.currency1).decimals();
     }
 }

@@ -20,6 +20,7 @@ import {PositionInfo, PositionInfoLibrary} from "@uniswap/v4-periphery/src/libra
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
 import {Swapper} from "./libraries/Swapper.sol";
+import {BaseLPManagerV4} from "../src/BaseLPManagerV4.sol";
 
 abstract contract LPManagerV4Test is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
@@ -38,7 +39,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
 
     struct InteractionInfo {
         uint256 positionId;
-        LPManagerV4.PoolKey poolKey;
+        BaseLPManagerV4.PoolKey poolKey;
         int24 tickLower;
         int24 tickUpper;
         address from;
@@ -52,13 +53,13 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         uint256 amount1;
     }
 
-    function _cast(LPManagerV4.PoolKey memory key) internal pure returns (UniswapPoolKey memory uKey) {
+    function _cast(BaseLPManagerV4.PoolKey memory key) internal pure returns (UniswapPoolKey memory uKey) {
         assembly {
             uKey := key
         }
     }
 
-    function _cast(UniswapPoolKey memory uKey) internal pure returns (LPManagerV4.PoolKey memory key) {
+    function _cast(UniswapPoolKey memory uKey) internal pure returns (BaseLPManagerV4.PoolKey memory key) {
         assembly {
             key := uKey
         }
@@ -78,19 +79,10 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         vm.stopPrank();
     }
 
-    function _provideAndApproveSpecific(bool needToProvide, IERC20Metadata asset_, uint256 amount_, address user_)
-        internal
-    {
-        if (address(asset_) == address(0)) {
-            deal(user_, amount_);
-        } else {
-            if (needToProvide) {
-                dealTokens(asset_, user_, amount_);
-            }
-            vm.startPrank(user_);
-            asset_.forceApprove(address(lpManager), amount_);
-            vm.stopPrank();
-        }
+    function _provideAndApproveSpecific(bool needToProvide, address asset_, uint256 amount_, address user_) internal {
+        _provideAndApproveSpecific(
+            needToProvide, IERC20Metadata(asset_), amount_, user_, address(lpManager), address(0)
+        );
     }
 
     function _getBalance(address token, address account) internal view returns (uint256) {
@@ -151,7 +143,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
-        LPManagerV4.PoolKey memory poolKey_,
+        BaseLPManagerV4.PoolKey memory poolKey_,
         int24 tickLower_,
         int24 tickUpper_
     ) internal {
@@ -162,12 +154,8 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         vm.prank(user_);
         IERC721(address(positionManager)).setApprovalForAll(address(lpManager), true);
 
-        _provideAndApproveSpecific(
-            true, IERC20Metadata(interactionInfo.poolKey.currency0), amountIn0_, interactionInfo.from
-        );
-        _provideAndApproveSpecific(
-            true, IERC20Metadata(interactionInfo.poolKey.currency1), amountIn1_, interactionInfo.from
-        );
+        _provideAndApproveSpecific(true, interactionInfo.poolKey.currency0, amountIn0_, interactionInfo.from);
+        _provideAndApproveSpecific(true, interactionInfo.poolKey.currency1, amountIn1_, interactionInfo.from);
 
         createPosition(amountIn0_, amountIn1_, user_, 1);
         console.log("POSITION CREATED", interactionInfo.positionId);
@@ -177,7 +165,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
-        LPManagerV4.PoolKey memory poolKey_,
+        BaseLPManagerV4.PoolKey memory poolKey_,
         int24 tickLower_,
         int24 tickUpper_,
         int24 newLower_,
@@ -185,18 +173,14 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
     ) public {
         _initializePosition(user_, amountIn0_, amountIn1_, poolKey_, tickLower_, tickUpper_);
 
-        _provideAndApproveSpecific(
-            true, IERC20Metadata(interactionInfo.poolKey.currency0), amountIn0_, interactionInfo.from
-        );
-        _provideAndApproveSpecific(
-            true, IERC20Metadata(interactionInfo.poolKey.currency1), amountIn1_, interactionInfo.from
-        );
+        _provideAndApproveSpecific(true, interactionInfo.poolKey.currency0, amountIn0_, interactionInfo.from);
+        _provideAndApproveSpecific(true, interactionInfo.poolKey.currency1, amountIn1_, interactionInfo.from);
 
         increaseLiquidity(amountIn0_, amountIn1_, 0);
         console.log("\nLIQUIDITY INCREASED\n");
 
         // claim zero fees
-        claimFees(0, 0, LPManagerV4.TransferInfoInToken.BOTH);
+        claimFees(0, 0, BaseLPManagerV4.TransferInfoInToken.BOTH);
         console.log("\nFEES CLAIMED\n");
 
         interactionInfo.tickLower = newLower_;
@@ -209,24 +193,24 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         console.log("\nFEES COMPOUNDED\n");
         _movePoolPrice();
 
-        uint256 snapshotId = vm.snapshot();
+        uint256 snapshotId = vm.snapshotState();
 
-        claimFees(0, 0, LPManagerV4.TransferInfoInToken.TOKEN0);
+        claimFees(0, 0, BaseLPManagerV4.TransferInfoInToken.TOKEN0);
         console.log("\nFEES CLAIMED in Token0\n");
         vm.revertTo(snapshotId);
 
-        claimFees(0, 0, LPManagerV4.TransferInfoInToken.TOKEN1);
+        claimFees(0, 0, BaseLPManagerV4.TransferInfoInToken.TOKEN1);
         console.log("\nFEES CLAIMED in Token1\n");
         vm.revertTo(snapshotId);
 
-        claimFees(0, 0, LPManagerV4.TransferInfoInToken.BOTH);
+        claimFees(0, 0, BaseLPManagerV4.TransferInfoInToken.BOTH);
         console.log("\nFEES CLAIMED in Both Tokens\n");
 
-        withdraw(5000, 0, 0, LPManagerV4.TransferInfoInToken.BOTH);
+        withdraw(5000, 0, 0, BaseLPManagerV4.TransferInfoInToken.BOTH);
         console.log("\nWITHDRAWN 50%\n");
-        withdraw(2500, 0, 0, LPManagerV4.TransferInfoInToken.TOKEN0);
+        withdraw(2500, 0, 0, BaseLPManagerV4.TransferInfoInToken.TOKEN0);
         console.log("\nWITHDRAWN 25% to Token0\n");
-        withdraw(10000, 0, 0, LPManagerV4.TransferInfoInToken.TOKEN1);
+        withdraw(10000, 0, 0, BaseLPManagerV4.TransferInfoInToken.TOKEN1);
         console.log("\nWITHDRAWN 100% to Token1\n");
     }
 
@@ -248,7 +232,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         vm.recordLogs();
 
         {
-            uint256 snapshotId = vm.snapshot();
+            uint256 snapshotId = vm.snapshotState();
             lpManager.createPosition{
                 value: interactionInfo.poolKey.currency0 == address(0)
                     ? amountIn0_
@@ -356,17 +340,17 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         _assertApproxEqUint(previewIncreaseLiquidity.amount1, added1);
     }
 
-    function claimFees(uint256 minAmountOut0_, uint256 minAmountOut1_, LPManagerV4.TransferInfoInToken transferIn)
+    function claimFees(uint256 minAmountOut0_, uint256 minAmountOut1_, BaseLPManagerV4.TransferInfoInToken transferIn)
         public
         _assertZeroBalances
     {
         // non-owner cannot claim
         vm.startPrank(user3);
-        vm.expectRevert(LPManagerV4.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV4.NotPositionOwner.selector);
         lpManager.claimFees(interactionInfo.positionId, user3, minAmountOut0_, minAmountOut1_);
-        vm.expectRevert(LPManagerV4.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV4.NotPositionOwner.selector);
         {
-            address tokenOut = transferIn == LPManagerV4.TransferInfoInToken.TOKEN0
+            address tokenOut = transferIn == BaseLPManagerV4.TransferInfoInToken.TOKEN0
                 ? interactionInfo.poolKey.currency0
                 : interactionInfo.poolKey.currency1;
             lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, tokenOut, 0);
@@ -376,7 +360,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         vm.startPrank(interactionInfo.from);
         vm.recordLogs();
 
-        if (transferIn == LPManagerV4.TransferInfoInToken.BOTH) {
+        if (transferIn == BaseLPManagerV4.TransferInfoInToken.BOTH) {
             PreviewInfo memory previewClaimFees;
             (previewClaimFees.amount0, previewClaimFees.amount1) =
                 lpManager.previewClaimFees(interactionInfo.positionId);
@@ -385,7 +369,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
             _assertApproxEqUint(previewClaimFees.amount0, amount0_);
             _assertApproxEqUint(previewClaimFees.amount1, amount1_);
         } else {
-            address tokenOut = (transferIn == LPManagerV4.TransferInfoInToken.TOKEN0)
+            address tokenOut = (transferIn == BaseLPManagerV4.TransferInfoInToken.TOKEN0)
                 ? interactionInfo.poolKey.currency0
                 : interactionInfo.poolKey.currency1;
 
@@ -398,7 +382,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
 
     function compoundFees() public _assertZeroBalances {
         vm.startPrank(user3);
-        vm.expectRevert(LPManagerV4.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV4.NotPositionOwner.selector);
         lpManager.compoundFees(interactionInfo.positionId, 0);
         vm.stopPrank();
 
@@ -482,16 +466,16 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         }
     }
 
-    function withdraw(uint32 percent, uint256 min0, uint256 min1, LPManagerV4.TransferInfoInToken transferIn)
+    function withdraw(uint32 percent, uint256 min0, uint256 min1, BaseLPManagerV4.TransferInfoInToken transferIn)
         public
         _assertZeroBalances
     {
         vm.startPrank(user3);
-        vm.expectRevert(LPManagerV4.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV4.NotPositionOwner.selector);
         lpManager.withdraw(interactionInfo.positionId, percent, user3, min0, min1);
-        vm.expectRevert(LPManagerV4.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV4.NotPositionOwner.selector);
         {
-            address tokenOut = transferIn == LPManagerV4.TransferInfoInToken.TOKEN0
+            address tokenOut = transferIn == BaseLPManagerV4.TransferInfoInToken.TOKEN0
                 ? interactionInfo.poolKey.currency0
                 : interactionInfo.poolKey.currency1;
             lpManager.withdraw(interactionInfo.positionId, percent, user3, tokenOut, 0);
@@ -502,7 +486,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
         uint128 liqBefore = positionManager.getPositionLiquidity(interactionInfo.positionId);
         PreviewInfo memory previewWithdraw;
 
-        if (transferIn == LPManagerV4.TransferInfoInToken.BOTH) {
+        if (transferIn == BaseLPManagerV4.TransferInfoInToken.BOTH) {
             (previewWithdraw.amount0, previewWithdraw.amount1) =
                 lpManager.previewWithdraw(interactionInfo.positionId, percent);
             (uint256 amount0_, uint256 amount1_) =
@@ -511,7 +495,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
             _assertApproxEqUint(previewWithdraw.amount1, amount1_);
         } else {
             address tokenOut;
-            if (transferIn == LPManagerV4.TransferInfoInToken.TOKEN0) {
+            if (transferIn == BaseLPManagerV4.TransferInfoInToken.TOKEN0) {
                 tokenOut = interactionInfo.poolKey.currency0;
             } else {
                 tokenOut = interactionInfo.poolKey.currency1;
@@ -537,7 +521,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
 
 contract LPManagerV4TestUnichain is LPManagerV4Test {
     using StateLibrary for IPoolManager;
-    LPManagerV4.PoolKey public key;
+    BaseLPManagerV4.PoolKey public key;
 
     function setUp() public override {
         vm.createSelectFork("unichain", lastCachedBlockid_UNICHAIN);
@@ -548,7 +532,7 @@ contract LPManagerV4TestUnichain is LPManagerV4Test {
 
     function test_usdc_weth_v4() public {
         // poolId: 0x3258f413c7a88cda2fa8709a589d221a80f6574f63df5a5b67 (bytes25)
-        key = LPManagerV4.PoolKey({
+        key = BaseLPManagerV4.PoolKey({
             currency0: address(0), currency1: address(usdc_UNICHAIN), fee: 500, tickSpacing: 10, hooks: address(0)
         });
 
@@ -559,7 +543,7 @@ contract LPManagerV4TestUnichain is LPManagerV4Test {
 
     function test_wbtc_usdc_v4() public {
         // poolId: 0xbd0f3a7cf4cf5f48ebe850474c8c0012fa5fe893ab811a8b87 (bytes25)
-        key = LPManagerV4.PoolKey({
+        key = BaseLPManagerV4.PoolKey({
             currency0: address(WBTC_oft_UNICHAIN),
             currency1: address(usdc_UNICHAIN),
             fee: 3000,
