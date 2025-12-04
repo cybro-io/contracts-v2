@@ -19,6 +19,8 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {FixedPoint128} from "@uniswap/v4-core/src/libraries/FixedPoint128.sol";
 
 abstract contract BaseLPManagerV4 is IUnlockCallback {
     using CurrencyLibrary for Currency;
@@ -154,7 +156,6 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
     /// @notice Basis points precision used across the contract (1e4 = 100%)
     uint32 public constant PRECISION = 1e4;
 
-    uint256 internal constant Q128 = 0x100000000000000000000000000000000;
     IAllowanceTransfer public constant PERMIT2 =
         IAllowanceTransfer(address(0x000000000022D473030F116dDEE9F6B43aC78BA3));
 
@@ -178,6 +179,20 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
     }
 
     /* ============ MODIFIERS ============ */
+
+    modifier onlyPositionOwner(uint256 positionId) {
+        _onlyPositionOwner(positionId);
+        _;
+    }
+
+    /**
+     * @notice Internal function that reverts unless the caller owns the specified position NFT.
+     * @dev Used by the onlyPositionOwner modifier to enforce ownership checks.
+     * @param positionId Uniswap v4 position token identifier.
+     */
+    function _onlyPositionOwner(uint256 positionId) internal view {
+        if (IERC721(address(positionManager)).ownerOf(positionId) != msg.sender) revert NotPositionOwner();
+    }
 
     /**
      * @notice Modifier to restrict function access to the PoolManager contract only.
@@ -719,8 +734,8 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
             poolManager.getFeeGrowthInside(poolId, tickLower, tickUpper);
 
         unchecked {
-            fee0 = FullMath.mulDiv(feeGrowthInside0X128 - feeGrowthInside0LastX128, liquidity, Q128);
-            fee1 = FullMath.mulDiv(feeGrowthInside1X128 - feeGrowthInside1LastX128, liquidity, Q128);
+            fee0 = FullMath.mulDiv(feeGrowthInside0X128 - feeGrowthInside0LastX128, liquidity, FixedPoint128.Q128);
+            fee1 = FullMath.mulDiv(feeGrowthInside1X128 - feeGrowthInside1LastX128, liquidity, FixedPoint128.Q128);
         }
     }
 

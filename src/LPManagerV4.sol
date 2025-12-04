@@ -10,7 +10,6 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {PositionInfo, PositionInfoLibrary} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {BaseLPManagerV4} from "./BaseLPManagerV4.sol";
 
 /**
@@ -27,22 +26,6 @@ contract LPManagerV4 is BaseLPManagerV4 {
         IPositionManager _positionManager,
         IProtocolFeeCollector _protocolFeeCollector
     ) BaseLPManagerV4(_poolManager, _positionManager, _protocolFeeCollector) {}
-
-    /* ============ MODIFIERS ============ */
-
-    modifier onlyPositionOwner(uint256 positionId) {
-        _onlyPositionOwner(positionId);
-        _;
-    }
-
-    /**
-     * @notice Internal function that reverts unless the caller owns the specified position NFT.
-     * @dev Used by the onlyPositionOwner modifier to enforce ownership checks.
-     * @param positionId Uniswap v4 position token identifier.
-     */
-    function _onlyPositionOwner(uint256 positionId) internal view {
-        if (IERC721(address(positionManager)).ownerOf(positionId) != msg.sender) revert NotPositionOwner();
-    }
 
     /* ============ VIEWS ============ */
 
