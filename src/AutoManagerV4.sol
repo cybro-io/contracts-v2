@@ -1,13 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
-import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
-import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {IAaveOracle} from "./interfaces/IAaveOracle.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -26,7 +21,6 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
  *      executes flows inherited from BaseLPManager.
  */
 contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
-    using SafeERC20 for IERC20Metadata;
     using ECDSA for bytes32;
     using StateLibrary for IPoolManager;
 
@@ -35,7 +29,7 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     /// @notice EIP-712 typed request to automatically close a position by withdrawing 100%
     /// @dev Triggers when current sqrtPriceX96 crosses the configured threshold
     struct AutoCloseRequest {
-        /// @notice Uniswap V3 position NFT id to operate on
+        /// @notice Uniswap position NFT id to operate on
         uint256 positionId;
         /// @notice Sqrt price threshold in Q96 (sqrtPriceX96) to trigger close
         uint160 triggerPrice;
@@ -101,7 +95,7 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     /* ============ CONSTANTS ============ */
 
     /// @notice Maximum allowed deviation from the trusted price (10%)
-    uint32 public constant maxDeviation = 1000;
+    uint32 public constant MAX_DEVIATION = 1000;
 
     bytes32 public constant AUTO_CLAIM_REQUEST_TYPEHASH = keccak256(
         "AutoClaimRequest(uint256 positionId,uint256 initialTimestamp,uint256 claimInterval,uint256 claimMinAmountUsd,address recipient,uint8 transferType, uint256 nonce)"
@@ -133,13 +127,15 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     /* ============ CONSTRUCTOR ============ */
 
     /**
-     * @notice Initializes the contract
-     * @param _poolManager Pool manager
-     * @param _positionManager Position manager
-     * @param _protocolFeeCollector Protocol fee collector
-     * @param _aaveOracle Aave price oracle
-     * @param admin Address to be granted DEFAULT_ADMIN_ROLE
-     * @param autoManager Address to be granted AUTO_MANAGER_ROLE
+     * @notice Initializes the AutoManagerV4 contract with necessary dependencies and role assignments.
+     * @dev Sets up EIP-712 domain separator with name "AutoManagerV4" and version "1".
+     * @param _poolManager Uniswap V4 pool manager contract.
+     * @param _positionManager Uniswap V4 position manager contract.
+     * @param _protocolFeeCollector Protocol fee collector contract for fee management.
+     * @param _aaveOracle Aave price oracle for fetching asset prices and validation.
+     * @param admin Address to be granted DEFAULT_ADMIN_ROLE.
+     * @param autoManager Address to be granted AUTO_MANAGER_ROLE for executing automated operations.
+     * @param _wrappedNative Address of wrapped native token (e.g., WETH) for oracle price lookups.
      */
     constructor(
         IPoolManager _poolManager,
@@ -185,7 +181,10 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         external
         onlyRole(AUTO_MANAGER_ROLE)
     {
+        // Verify claim conditions are met (time interval or minimum USD value)
         require(needsClaimFees(request), NotNeededAutoAction());
+
+        // Validate signature from position owner
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLAIM_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
@@ -199,7 +198,10 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
      * @param signature EIP-712 signature by the current position owner
      */
     function autoClose(AutoCloseRequest calldata request, bytes memory signature) external onlyRole(AUTO_MANAGER_ROLE) {
+        // Verify price trigger condition is met
         require(needsClose(request), NotNeededAutoAction());
+
+        // Validate signature from position owner
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLOSE_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
@@ -215,7 +217,10 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         external
         onlyRole(AUTO_MANAGER_ROLE)
     {
+        // Verify rebalance trigger condition is met (price outside bounds)
         require(needsRebalance(request), NotNeededAutoAction());
+
+        // Validate signature from position owner and get owner address
         address owner = _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_REBALANCE_REQUEST_TYPEHASH, request))),
             signature,
@@ -227,6 +232,7 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         int24 newLower;
         int24 newUpper;
         {
+            // Calculate new range centered on current tick with same width as before
             int24 widthTicks = ctx.tickUpper - ctx.tickLower;
             newLower = currentTick - widthTicks / 2;
             newLower -= newLower % ctx.poolKey.tickSpacing;
@@ -244,6 +250,7 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
      * @return True if claim should be executed now
      */
     function needsClaimFees(AutoClaimRequest calldata request) public view returns (bool) {
+        // Check time-based trigger: has enough time passed since last claim?
         if ((request.initialTimestamp > 0 && request.claimInterval > 0)) {
             uint256 nextClaimTimestamp =
                 (request.initialTimestamp > lastAutoClaim[request.positionId]
@@ -253,11 +260,14 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
                 return true;
             }
         }
+
+        // Check amount-based trigger: do accumulated fees exceed minimum USD threshold?
         if (request.claimMinAmountUsd > 0) {
             PoolKey memory poolKey = _getPoolKey(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
             (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
 
+            // Calculate total fee value in USD
             uint256 feesUsd = FullMath.mulDiv(fees0, price0, decimals0) + FullMath.mulDiv(fees1, price1, decimals1);
 
             return feesUsd >= request.claimMinAmountUsd;
@@ -305,7 +315,11 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         returns (address owner)
     {
         owner = IERC721(address(positionManager)).ownerOf(positionId);
+
+        // Recover signer from signature and verify it matches the owner
         require(digest.recover(signature) == owner, InvalidSignature());
+
+        // Check that the owner hasn't invalidated this specific digest
         require(!digests[owner][digest], InvalidDigest());
     }
 
@@ -317,14 +331,11 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         uint256 deviation = FullMath.mulDiv(
             uint256(getCurrentSqrtPriceX96(poolKey)) ** 2, PRECISION, _getTrustedSqrtPrice(poolKey) ** 2
         );
-        require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
+        require((deviation > PRECISION - MAX_DEVIATION) && (deviation < PRECISION + MAX_DEVIATION), PriceManipulation());
     }
 
     /**
      * @notice Returns a "trusted" sqrtPriceX96 for the pool
-     * @dev Pulls `price0` and `price1` from the Aave oracle. If either price is unavailable (zero),
-     *      falls back to the pool 30‑minute TWAP. The formula computes sqrt(price1/price0) in Q96 and
-     *      adjusts it by token decimals so that the result matches Uniswap V3 sqrtPriceX96 semantics.
      * @param poolKey Pool key
      * @return trustedSqrtPrice Trusted sqrt price in Q96 format (sqrtPriceX96)
      */
@@ -336,19 +347,22 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     }
 
     /**
-     * @notice Fetches token prices from the Aave oracle and their decimal multipliers
-     * @dev Prices are read via `IAaveOracle.getAssetPrice`
-     * @param poolKey Pool key
-     * @return price0 Token0 price in the oracle base
-     * @return price1 Token1 price in the oracle base
-     * @return decimals0 10**decimals(token0)
-     * @return decimals1 10**decimals(token1)
+     * @notice Fetches token prices from the Aave oracle and calculates decimal multipliers.
+     * @dev Queries oracle prices for both tokens using `IAaveOracle.getAssetPrice`.
+     *      For native ETH (address(0)), uses wrappedNative address for oracle lookup.
+     *      Reverts with NoPrice if oracle call fails for either token.
+     * @param poolKey Pool key containing currency pair information.
+     * @return price0 Token0 price in oracle base currency (e.g., USD with 8 decimals).
+     * @return price1 Token1 price in oracle base currency.
+     * @return decimals0 Decimal multiplier for token0 (10^decimals).
+     * @return decimals1 Decimal multiplier for token1 (10^decimals).
      */
     function _getPricesFromOracles(PoolKey memory poolKey)
         internal
         view
         returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
     {
+        // Fetch price for token0 (use wrapped native if currency is address(0))
         try aaveOracle.getAssetPrice(poolKey.currency0 == address(0) ? wrappedNative : poolKey.currency0) returns (
             uint256 price0_
         ) {
@@ -357,6 +371,7 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
             revert NoPrice();
         }
 
+        // Fetch price for token1 (use wrapped native if currency is address(0))
         try aaveOracle.getAssetPrice(poolKey.currency1 == address(0) ? wrappedNative : poolKey.currency1) returns (
             uint256 price1_
         ) {

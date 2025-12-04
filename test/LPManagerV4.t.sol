@@ -197,11 +197,11 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
 
         claimFees(0, 0, BaseLPManagerV4.TransferInfoInToken.TOKEN0);
         console.log("\nFEES CLAIMED in Token0\n");
-        vm.revertTo(snapshotId);
+        vm.revertToState(snapshotId);
 
         claimFees(0, 0, BaseLPManagerV4.TransferInfoInToken.TOKEN1);
         console.log("\nFEES CLAIMED in Token1\n");
-        vm.revertTo(snapshotId);
+        vm.revertToState(snapshotId);
 
         claimFees(0, 0, BaseLPManagerV4.TransferInfoInToken.BOTH);
         console.log("\nFEES CLAIMED in Both Tokens\n");
@@ -246,7 +246,7 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
                 interactionInfo.from,
                 minLiquidity_
             );
-            vm.revertTo(snapshotId);
+            vm.revertToState(snapshotId);
         }
 
         (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition{

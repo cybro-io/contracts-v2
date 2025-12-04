@@ -4,27 +4,21 @@ pragma solidity 0.8.30;
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {PositionInfoLibrary} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
-import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
-import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
-import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {PoolKey as UniswapPoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
-import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {PositionInfo, PositionInfoLibrary} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
+import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 
 abstract contract BaseLPManagerV4 is IUnlockCallback {
     using CurrencyLibrary for Currency;
@@ -57,6 +51,7 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         uint256 price;
     }
 
+    /// @notice Same struct as UniswapV4 PoolKey but with native types
     struct PoolKey {
         address currency0;
         address currency1;
@@ -146,26 +141,28 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
     error InvalidSwapCallbackCaller();
     /// @notice Thrown when msg.sender is not the owner of the specified position
     error NotPositionOwner();
-
+    /// @notice Thrown when the ETH mismatch
     error ETHMismatch();
+    /// @notice Thrown when the ETH transfer failed
     error ETHTransferFailed();
 
     /* ============ CONSTANTS ============ */
 
     // Action ID for internal swap callback
     uint8 internal constant CALLBACK_ACTION_SWAP = 1;
-    uint256 internal constant MASK_UPPER_200_BITS = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000;
 
     /// @notice Basis points precision used across the contract (1e4 = 100%)
     uint32 public constant PRECISION = 1e4;
 
     uint256 internal constant Q128 = 0x100000000000000000000000000000000;
-    IAllowanceTransfer public constant permit2 =
+    IAllowanceTransfer public constant PERMIT2 =
         IAllowanceTransfer(address(0x000000000022D473030F116dDEE9F6B43aC78BA3));
 
     /* ============ IMMUTABLES ============ */
 
+    /// @notice Uniswap V4 PoolManager
     IPoolManager public immutable poolManager;
+    /// @notice Uniswap V4 PositionManager
     IPositionManager public immutable positionManager;
     /// @notice External protocol fee collector used to compute and receive protocol fees
     IProtocolFeeCollector public immutable protocolFeeCollector;
@@ -182,6 +179,10 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
 
     /* ============ MODIFIERS ============ */
 
+    /**
+     * @notice Modifier to restrict function access to the PoolManager contract only.
+     * @dev Used for callback function that should only be called by the PoolManager.
+     */
     modifier onlyPoolManager() {
         _onlyPoolManager();
         _;
@@ -202,17 +203,32 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         (sqrtPriceX96,,,) = poolManager.getSlot0(_toId(key));
     }
 
+    /**
+     * @notice Returns current sqrt price (Q96) for the given pool ID.
+     * @param poolId Pool identifier.
+     * @return sqrtPriceX96 Current sqrt price in Q96 format.
+     */
     function getCurrentSqrtPriceX96(PoolId poolId) public view returns (uint160 sqrtPriceX96) {
         (sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
     }
 
     /* ============ INTERNAL VIEWS ============ */
 
+    /**
+     * @notice Loads the pool key associated with a position token.
+     * @param positionId Uniswap v4 position token identifier.
+     * @return key Pool key containing token addresses, fee and hook info.
+     */
     function _getPoolKey(uint256 positionId) internal view returns (PoolKey memory key) {
         (UniswapPoolKey memory uKey,) = positionManager.getPoolAndPositionInfo(positionId);
         key = _cast(uKey);
     }
 
+    /**
+     * @notice Computes the pool id for a position token.
+     * @param positionId Uniswap v4 position token identifier.
+     * @return PoolId Derived identifier used by the PoolManager storage.
+     */
     function _getPoolId(uint256 positionId) internal view returns (PoolId) {
         (UniswapPoolKey memory key,) = positionManager.getPoolAndPositionInfo(positionId);
         return _toId(_cast(key));
@@ -225,9 +241,9 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
     }
 
     /**
-     * @notice Reads current liquidity of a Uniswap V4 position
-     * @param positionId Position NFT id
-     * @return liquidity Current position liquidity
+     * @notice Reads the currently staked liquidity for a position NFT.
+     * @param positionId Position NFT id.
+     * @return liquidity Amount of liquidity tracked in the v4 position manager.
      */
     function _getTokenLiquidity(uint256 positionId) internal view returns (uint128 liquidity) {
         liquidity = positionManager.getPositionLiquidity(positionId);
@@ -305,11 +321,14 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         uint256 minLiquidity,
         address sendBackTo
     ) internal returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+        // Collect protocol fees from input amounts
         amount0 = _collectProtocolFee(ctx.poolKey.currency0, amount0, IProtocolFeeCollector.FeeType.LIQUIDITY);
         amount1 = _collectProtocolFee(ctx.poolKey.currency1, amount1, IProtocolFeeCollector.FeeType.LIQUIDITY);
 
+        // Rebalance amounts to optimal ratio for the tick range
         (amount0, amount1) = _toOptimalRatio(ctx, amount0, amount1);
 
+        // Calculate liquidity and check minimum threshold
         liquidity = _getLiquidityForAmounts(ctx, amount0, amount1);
         if (liquidity < minLiquidity) revert LiquidityLessThanMin();
 
@@ -320,20 +339,20 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
             bytes memory actions;
             bytes[] memory params;
 
-            // has native token
             if (ctx.poolKey.currency0 == address(0) || ctx.poolKey.currency1 == address(0)) {
                 actions =
                     abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP));
                 params = new bytes[](3);
-                // Sweep the native token
                 params[2] = abi.encode(
                     ctx.poolKey.currency0 == address(0) ? ctx.poolKey.currency0 : ctx.poolKey.currency1, address(this)
                 );
             } else {
+                // For ERC20-only pairs, no sweep needed
                 actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
                 params = new bytes[](2);
             }
 
+            // Encode MINT_POSITION parameters
             params[0] = abi.encode(
                 ctx.poolKey,
                 ctx.tickLower,
@@ -344,19 +363,25 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
                 recipient,
                 new bytes(0)
             );
+            // Encode SETTLE_PAIR parameters
             params[1] = abi.encode(ctx.poolKey.currency0, ctx.poolKey.currency1);
 
+            // Calculate ETH value to send if dealing with native currency
             uint256 msgValue =
                 ctx.poolKey.currency0 == address(0) ? amount0 : ctx.poolKey.currency1 == address(0) ? amount1 : 0;
+
+            // Track balances to determine actual amounts used
             uint256 balance0Before = _getBalance(ctx.poolKey.currency0);
             uint256 balance1Before = _getBalance(ctx.poolKey.currency1);
             positionManager.modifyLiquidities{value: msgValue}(abi.encode(actions, params), block.timestamp);
 
+            // Calculate actual amounts consumed
             amount0Used = balance0Before - _getBalance(ctx.poolKey.currency0);
             amount1Used = balance1Before - _getBalance(ctx.poolKey.currency1);
         }
         positionId = positionManager.nextTokenId() - 1;
 
+        // Refund any unused tokens to sender
         _sendBackRemainingTokens(
             ctx.poolKey.currency0, ctx.poolKey.currency1, amount0 - amount0Used, amount1 - amount1Used, sendBackTo
         );
@@ -446,15 +471,15 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
     }
 
     /**
-     * @notice Applies protocol fee, optionally swaps into a single token and transfers outputs
-     * @param amount0In Input amount of token0 before fee
-     * @param amount1In Input amount of token1 before fee
-     * @param positionId Position id (used to resolve pool and tokens)
-     * @param transferInfoInToken Transfer mode: BOTH or single token
-     * @param feeType Fee type to apply (LIQUIDITY/DEPOSIT/FEES)
-     * @param recipient Receiver of final outputs
-     * @return amount0 Final amount of token0 transferred
-     * @return amount1 Final amount of token1 transferred
+     * @notice Applies protocol fees and performs an optional single-token conversion before transferring funds out.
+     * @param amount0In Raw token0 amount pre fee.
+     * @param amount1In Raw token1 amount pre fee.
+     * @param positionId Position identifier used to resolve pool metadata.
+     * @param transferInfoInToken Specifies whether to withdraw both tokens or a single side.
+     * @param feeType Type of protocol fee (liquidity, deposit or fees).
+     * @param recipient Destination that receives the net amounts.
+     * @return amount0 Net amount of token0 delivered to the recipient.
+     * @return amount1 Net amount of token1 delivered to the recipient.
      */
     function _chargeFeeSwapTransfer(
         uint256 amount0In,
@@ -538,8 +563,10 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
     }
 
     /**
-     * @notice Gets current price, lower, and upper
-     * @param ctx Position context
+     * @notice Retrieves current pool price and converts tick boundaries to sqrt prices.
+     * @dev Returns a Prices struct containing current, lower and upper sqrt prices in Q96 format.
+     * @param ctx Position context containing pool key and tick range.
+     * @return prices Struct with current, lower and upper sqrt prices.
      */
     function _currentLowerUpper(PositionContext memory ctx) internal view returns (Prices memory prices) {
         prices.current = getCurrentSqrtPriceX96(ctx.poolKey);
@@ -588,6 +615,16 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         }
     }
 
+    /**
+     * @notice Withdraws liquidity from a position, applies protocol fees, optionally swaps, and transfers to recipient.
+     * @dev Combines withdraw, fee collection, optional swap and transfer operations in a single call.
+     * @param positionId Position token identifier.
+     * @param percent Percentage of liquidity to withdraw (scaled by PRECISION).
+     * @param recipient Address to receive the withdrawn tokens.
+     * @param transferInfoInToken Specifies output format: BOTH, TOKEN0, or TOKEN1.
+     * @return amount0 Net amount of token0 transferred to recipient.
+     * @return amount1 Net amount of token1 transferred to recipient.
+     */
     function _withdrawAndChargeFee(
         uint256 positionId,
         uint32 percent,
@@ -660,7 +697,7 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
     }
 
     /**
-     * @notice Calculates unclaimed fees inside a range using Uniswap V3 fee growth accumulators
+     * @notice Calculates unclaimed fees
      * @param poolId Pool id
      * @param tickLower Lower tick
      * @param tickUpper Upper tick
@@ -687,25 +724,25 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         }
     }
 
+    /**
+     * @notice Ensures Permit2 approvals are set for a token prior to interacting with the position manager.
+     * @param token Asset to approve.
+     * @param amount Allowance to grant.
+     */
     function _approvePermit2(address token, uint256 amount) internal {
         if (token != address(0)) {
-            IERC20Metadata(token).forceApprove(address(permit2), amount);
-            permit2.approve(token, address(positionManager), uint160(amount), type(uint48).max);
+            IERC20Metadata(token).forceApprove(address(PERMIT2), amount);
+            PERMIT2.approve(token, address(positionManager), uint160(amount), type(uint48).max);
         }
     }
 
     /**
-     * @notice Ensures allowance for the position manager is at least the required amount
-     * @param token ERC20 token address
-     * @param amount Minimal allowance required
+     * @notice Converts token balances into their theoretical liquidity contribution for a given range.
+     * @param ctx Position context describing the pool and tick range.
+     * @param amount0 Available token0 balance.
+     * @param amount1 Available token1 balance.
+     * @return liquidity Amount of liquidity that can be minted with the provided balances.
      */
-    function _ensureAllowance(address token, uint256 amount) internal {
-        uint256 currentAllowance = IERC20Metadata(token).allowance(address(this), address(positionManager));
-        if (currentAllowance < amount) {
-            IERC20Metadata(token).forceApprove(address(positionManager), amount);
-        }
-    }
-
     function _getLiquidityForAmounts(PositionContext memory ctx, uint256 amount0, uint256 amount1)
         internal
         view
@@ -739,6 +776,11 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         _transfer(token1, amount1, recipient);
     }
 
+    /**
+     * @notice Pulls tokens from the caller into the manager
+     * @param token Asset being transferred. Zero address denotes native currency.
+     * @param amount Amount expected to be provided.
+     */
     function _pullToken(address token, uint256 amount) internal {
         if (token != address(0)) {
             IERC20Metadata(token).safeTransferFrom(msg.sender, address(this), amount);
@@ -747,6 +789,11 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         }
     }
 
+    /**
+     * @notice Helper that returns the contract's balance for ERC20 tokens or native currency.
+     * @param token Asset whose balance is being queried.
+     * @return Current balance held by this contract.
+     */
     function _getBalance(address token) internal view returns (uint256) {
         if (token == address(0)) {
             return address(this).balance;
@@ -755,6 +802,12 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         }
     }
 
+    /**
+     * @notice Transfers ERC20 or native tokens to a recipient.
+     * @param token Asset address (zero for native).
+     * @param amount Amount to transfer.
+     * @param to Recipient of the funds.
+     */
     function _transfer(address token, uint256 amount, address to) internal {
         if (amount == 0) return;
         if (token == address(0)) {
@@ -767,22 +820,34 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         }
     }
 
+    /**
+     * @notice Casts the local PoolKey struct into the uniswap PoolKey representation.
+     */
     function _cast(PoolKey memory key) internal pure returns (UniswapPoolKey memory uKey) {
         assembly {
             uKey := key
         }
     }
 
+    /**
+     * @notice Casts the uniswap PoolKey representation into the local struct.
+     */
     function _cast(UniswapPoolKey memory uKey) internal pure returns (PoolKey memory key) {
         assembly {
             key := uKey
         }
     }
 
+    /**
+     * @notice Computes the deterministic PoolId used by the PoolManager storage from a pool key.
+     */
     function _toId(PoolKey memory key) internal pure returns (PoolId) {
         return PoolId.wrap(keccak256(abi.encode(key)));
     }
 
+    /**
+     * @notice Returns the decimal multiplier for a token, defaulting to 18 in case of the native currency.
+     */
     function _getDecimals(address token) internal view returns (uint8 decimals) {
         if (token == address(0)) {
             return 18;
@@ -795,9 +860,17 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
 
     /* ============ CALLBACK ============ */
 
+    /**
+     * @notice Callback function invoked by PoolManager during unlock() to execute swap operations.
+     * @dev Only callable by PoolManager. Decodes action type and executes corresponding operation.
+     *      Currently supports CALLBACK_ACTION_SWAP for executing swaps with settlement.
+     * @param data Encoded callback data containing action type and parameters.
+     * @return Encoded result data (BalanceDelta for swaps).
+     */
     function unlockCallback(bytes calldata data) external override onlyPoolManager returns (bytes memory) {
         (uint8 action, bytes memory params) = abi.decode(data, (uint8, bytes));
         if (action == CALLBACK_ACTION_SWAP) {
+            // Decode swap parameters
             (PoolKey memory _key, bool zeroForOne, uint256 amount, uint160 sqrtPriceLimitX96) =
                 abi.decode(params, (PoolKey, bool, uint256, uint160));
 
@@ -813,9 +886,12 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
 
             (Currency currencyIn, Currency currencyOut) =
                 zeroForOne ? (key.currency0, key.currency1) : (key.currency1, key.currency0);
+
+            // Calculate debt (input amount) and output amount from delta
             uint128 debt = zeroForOne ? uint128(-delta.amount0()) : uint128(-delta.amount1());
             uint128 amountOut = zeroForOne ? uint128(delta.amount1()) : uint128(delta.amount0());
 
+            // Settle debt with pool manager
             if (debt > 0) {
                 poolManager.sync(currencyIn);
                 if (currencyIn.isAddressZero()) {
@@ -826,6 +902,7 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
                 }
             }
 
+            // Take output tokens from pool manager
             if (amountOut > 0) {
                 poolManager.take(currencyOut, address(this), amountOut);
             }
