@@ -577,7 +577,6 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         want1 = _zeroToOne(uint256(prices.current), want1);
         if (amount0 > want0) {
             uint160 limit = _priceLimitForExcess(true, prices);
-
             (int256 d0, int256 d1) = _swapWithPriceLimit(true, amount0 - want0, ctx.poolInfo, limit);
             amount0 -= uint256(d0);
             amount1 += uint256(-d1);
