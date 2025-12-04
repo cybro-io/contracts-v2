@@ -36,8 +36,6 @@ contract LPManagerV4 is BaseLPManagerV4 {
         IProtocolFeeCollector _protocolFeeCollector
     ) BaseLPManagerV4(_poolManager, _positionManager, _protocolFeeCollector) {}
 
-    receive() external payable {}
-
     /* ============ MODIFIERS ============ */
 
     modifier onlyPositionOwner(uint256 positionId) {
@@ -429,13 +427,5 @@ contract LPManagerV4 is BaseLPManagerV4 {
 
         uint256 ratio = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), 1 << 192);
         price = FullMath.mulDiv(ratio, 10 ** _getDecimals(token0), 10 ** _getDecimals(token1));
-    }
-
-    function _getDecimals(address token) internal view returns (uint8 decimals) {
-        if (token == address(0)) {
-            return 18;
-        } else {
-            return IERC20Metadata(token).decimals();
-        }
     }
 }

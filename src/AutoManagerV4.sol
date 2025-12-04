@@ -115,6 +115,9 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     /// @notice Role identifier allowed to execute automated flows (`auto*` functions)
     bytes32 public constant AUTO_MANAGER_ROLE = keccak256("AUTO_MANAGER_ROLE");
 
+    /// @notice Wrapped native currency address(e.g. WETH)
+    address public immutable wrappedNative;
+
     /* ============ STATE VARIABLES ============ */
 
     /// @notice External price oracle used to fetch asset prices
@@ -144,12 +147,14 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         IProtocolFeeCollector _protocolFeeCollector,
         IAaveOracle _aaveOracle,
         address admin,
-        address autoManager
+        address autoManager,
+        address _wrappedNative
     ) EIP712("AutoManagerV4", "1") BaseLPManagerV4(_poolManager, _positionManager, _protocolFeeCollector) {
         aaveOracle = _aaveOracle;
         baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(AUTO_MANAGER_ROLE, autoManager);
+        wrappedNative = _wrappedNative;
     }
 
     /* ============ EXTERNAL FUNCTIONS ============ */
@@ -344,19 +349,23 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         view
         returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
     {
-        try aaveOracle.getAssetPrice(poolKey.currency0) returns (uint256 price0_) {
+        try aaveOracle.getAssetPrice(poolKey.currency0 == address(0) ? wrappedNative : poolKey.currency0) returns (
+            uint256 price0_
+        ) {
             price0 = price0_;
         } catch {
             revert NoPrice();
         }
 
-        try aaveOracle.getAssetPrice(poolKey.currency1) returns (uint256 price1_) {
+        try aaveOracle.getAssetPrice(poolKey.currency1 == address(0) ? wrappedNative : poolKey.currency1) returns (
+            uint256 price1_
+        ) {
             price1 = price1_;
         } catch {
             revert NoPrice();
         }
 
-        decimals0 = 10 ** IERC20Metadata(poolKey.currency0).decimals();
-        decimals1 = 10 ** IERC20Metadata(poolKey.currency1).decimals();
+        decimals0 = 10 ** _getDecimals(poolKey.currency0);
+        decimals1 = 10 ** _getDecimals(poolKey.currency1);
     }
 }

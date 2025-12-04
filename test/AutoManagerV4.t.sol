@@ -30,7 +30,7 @@ import {PoolKey as UniswapPoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol"
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
-contract AutoManagerTest is Test, DeployUtils {
+contract AutoManagerV4Test is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
@@ -43,6 +43,7 @@ contract AutoManagerTest is Test, DeployUtils {
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
     LPManagerV4 public lpManager;
+    address public wrappedNative;
 
     Swapper swapper;
 
@@ -82,7 +83,8 @@ contract AutoManagerTest is Test, DeployUtils {
             IProtocolFeeCollector(address(protocolFeeCollector)),
             aaveOracle,
             address(admin),
-            address(admin)
+            address(admin),
+            address(wrappedNative)
         );
         lpManager = new LPManagerV4(poolManager, positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
@@ -229,7 +231,7 @@ contract AutoManagerTest is Test, DeployUtils {
                 interactionInfo.from,
                 minLiquidity_
             );
-            vm.revertTo(snapshotId);
+            vm.revertToState(snapshotId);
         }
 
         (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition{
@@ -462,67 +464,53 @@ contract AutoManagerTest is Test, DeployUtils {
     }
 }
 
-// contract AutoManagerTestUnichain is AutoManagerTest {
-//     using StateLibrary for IPoolManager;
-//     using PoolIdLibrary for UniswapPoolKey;
+contract AutoManagerV4TestBaseChain is AutoManagerV4Test {
+    using StateLibrary for IPoolManager;
+    using PoolIdLibrary for UniswapPoolKey;
 
-//     BaseLPManagerV4.PoolKey public key;
+    BaseLPManagerV4.PoolKey public key;
 
-//     function setUp() public override {
-//         vm.createSelectFork("unichain", lastCachedBlockid_UNICHAIN);
-//         poolManager = poolManager_UNICHAIN;
-//         positionManager = positionManager_UNICHAIN;
-//         aaveOracle = IAaveOracle(10101010);
-//         super.setUp();
-//     }
+    function setUp() public override {
+        vm.createSelectFork("base", lastCachedBlockid_BASE);
+        poolManager = poolManager_BASE;
+        positionManager = positionManager_BASE;
+        aaveOracle = aaveOracle_BASE;
+        wrappedNative = address(weth_BASE);
+        super.setUp();
+    }
 
-//     function test_usdc_weth_v4() public {
-//         // poolId: 0x3258f413c7a88cda2fa8709a589d221a80f6574f63df5a5b67 (bytes25)
-//         key = BaseLPManagerV4.PoolKey({
-//             currency0: address(0), currency1: address(usdc_UNICHAIN), fee: 500, tickSpacing: 10, hooks: address(0)
-//         });
+    function test_usdc_eth_v4() public {
+        // poolId: 0xaf15cd1f9c3874bbcfddfc2b544544612c9de8c8bae28ba21c (bytes25)
+        key = BaseLPManagerV4.PoolKey({
+            currency0: address(0), currency1: address(usdc_BASE), fee: 500, tickSpacing: 10, hooks: address(0)
+        });
 
-//         uint256 amountIn0 = 1e18;
-//         uint256 amountIn1 = 1000e6;
-//         _test(amountIn0, amountIn1);
-//     }
+        uint256 amountIn0 = 1e18;
+        uint256 amountIn1 = 1000e6;
+        _test(amountIn0, amountIn1);
+    }
 
-//     function test_wbtc_usdc_v4() public {
-//         // poolId: 0xbd0f3a7cf4cf5f48ebe850474c8c0012fa5fe893ab811a8b87 (bytes25)
-//         key = BaseLPManagerV4.PoolKey({
-//             currency0: address(WBTC_oft_UNICHAIN),
-//             currency1: address(usdc_UNICHAIN),
-//             fee: 3000,
-//             tickSpacing: 60,
-//             hooks: address(0)
-//         });
+    function _test(uint256 amountIn0, uint256 amountIn1) public {
+        _testGetters();
+        (uint160 currentPrice, int24 currentTick,,) = poolManager.getSlot0(_cast(key).toId());
+        int24 tickSpacing = key.tickSpacing;
 
-//         uint256 amountIn0 = 1e6;
-//         uint256 amountIn1 = 1000e6;
-//         _test(amountIn0, amountIn1);
-//     }
+        currentTick -= currentTick % tickSpacing;
+        int24 diff = tickSpacing / 10;
+        currentTick -= currentTick % tickSpacing;
+        console.log("tickSpacing", tickSpacing);
+        console.log("currentTick", currentTick);
+        int24 tickLower = currentTick + tickSpacing * (20 / diff);
+        int24 tickUpper = tickLower + tickSpacing * (400 / diff);
+        int24 newLower = tickLower + tickSpacing * (40 / diff);
+        int24 newUpper = newLower + tickSpacing * (400 / diff);
 
-//     function _test(uint256 amountIn0, uint256 amountIn1) public {
-//         // _testGetters();
-//         (uint160 currentPrice, int24 currentTick,,) = poolManager.getSlot0(_cast(key).toId());
-//         int24 tickSpacing = key.tickSpacing;
+        uint256 snapshotId = vm.snapshotState();
+        autoClaimFees(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
 
-//         currentTick -= currentTick % tickSpacing;
-//         int24 diff = tickSpacing / 10;
-//         currentTick -= currentTick % tickSpacing;
-//         console.log("tickSpacing", tickSpacing);
-//         console.log("currentTick", currentTick);
-//         int24 tickLower = currentTick + tickSpacing * (20 / diff);
-//         int24 tickUpper = tickLower + tickSpacing * (400 / diff);
-//         int24 newLower = tickLower + tickSpacing * (40 / diff);
-//         int24 newUpper = newLower + tickSpacing * (400 / diff);
-
-//         uint256 snapshotId = vm.snapshotState();
-//         // autoClaimFees(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
-
-//         // vm.revertToState(snapshotId);
-//         autoClose(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
-//         vm.revertToState(snapshotId);
-//         autoRebalance(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
-//     }
-// }
+        vm.revertToState(snapshotId);
+        autoClose(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+        autoRebalance(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
+    }
+}

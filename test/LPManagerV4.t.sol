@@ -530,7 +530,7 @@ contract LPManagerV4TestUnichain is LPManagerV4Test {
         super.setUp();
     }
 
-    function test_usdc_weth_v4() public {
+    function test_usdc_eth_v4() public {
         // poolId: 0x3258f413c7a88cda2fa8709a589d221a80f6574f63df5a5b67 (bytes25)
         key = BaseLPManagerV4.PoolKey({
             currency0: address(0), currency1: address(usdc_UNICHAIN), fee: 500, tickSpacing: 10, hooks: address(0)

@@ -783,6 +783,16 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         return PoolId.wrap(keccak256(abi.encode(key)));
     }
 
+    function _getDecimals(address token) internal view returns (uint8 decimals) {
+        if (token == address(0)) {
+            return 18;
+        } else {
+            return IERC20Metadata(token).decimals();
+        }
+    }
+
+    receive() external payable {}
+
     /* ============ CALLBACK ============ */
 
     function unlockCallback(bytes calldata data) external override onlyPoolManager returns (bytes memory) {
