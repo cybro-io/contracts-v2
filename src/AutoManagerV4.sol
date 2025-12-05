@@ -266,6 +266,9 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
             PoolKey memory poolKey = _getPoolKey(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
             (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
+            if (price0 == 0 || price1 == 0) {
+                revert NoPrice();
+            }
 
             // Calculate total fee value in USD
             uint256 feesUsd = FullMath.mulDiv(fees0, price0, decimals0) + FullMath.mulDiv(fees1, price1, decimals1);
@@ -328,9 +331,12 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
      * @param poolKey Pool key
      */
     function _checkPriceManipulation(PoolKey memory poolKey) internal view {
-        uint256 deviation = FullMath.mulDiv(
-            uint256(getCurrentSqrtPriceX96(poolKey)) ** 2, PRECISION, _getTrustedSqrtPrice(poolKey) ** 2
-        );
+        uint256 trustedSqrtPrice = _getTrustedSqrtPrice(poolKey);
+        if (trustedSqrtPrice == 0) {
+            return;
+        }
+        uint256 deviation =
+            FullMath.mulDiv(uint256(getCurrentSqrtPriceX96(poolKey)) ** 2, PRECISION, trustedSqrtPrice ** 2);
         require((deviation > PRECISION - MAX_DEVIATION) && (deviation < PRECISION + MAX_DEVIATION), PriceManipulation());
     }
 
@@ -341,7 +347,9 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
      */
     function _getTrustedSqrtPrice(PoolKey memory poolKey) internal view returns (uint256 trustedSqrtPrice) {
         (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
-
+        if (price0 == 0 || price1 == 0) {
+            return 0;
+        }
         trustedSqrtPrice = Math.sqrt(FullMath.mulDiv(price0, 2 ** 96, price1))
             * Math.sqrt(FullMath.mulDiv(decimals1, 2 ** 96, decimals0));
     }
@@ -350,7 +358,6 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
      * @notice Fetches token prices from the Aave oracle and calculates decimal multipliers.
      * @dev Queries oracle prices for both tokens using `IAaveOracle.getAssetPrice`.
      *      For native ETH (address(0)), uses wrappedNative address for oracle lookup.
-     *      Reverts with NoPrice if oracle call fails for either token.
      * @param poolKey Pool key containing currency pair information.
      * @return price0 Token0 price in oracle base currency (e.g., USD with 8 decimals).
      * @return price1 Token1 price in oracle base currency.
@@ -367,18 +374,14 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
             uint256 price0_
         ) {
             price0 = price0_;
-        } catch {
-            revert NoPrice();
-        }
+        } catch {}
 
         // Fetch price for token1 (use wrapped native if currency is address(0))
         try aaveOracle.getAssetPrice(poolKey.currency1 == address(0) ? wrappedNative : poolKey.currency1) returns (
             uint256 price1_
         ) {
             price1 = price1_;
-        } catch {
-            revert NoPrice();
-        }
+        } catch {}
 
         decimals0 = 10 ** _getDecimals(poolKey.currency0);
         decimals1 = 10 ** _getDecimals(poolKey.currency1);
