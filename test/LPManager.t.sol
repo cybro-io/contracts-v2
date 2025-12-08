@@ -69,12 +69,7 @@ abstract contract LPManagerTest is Test, DeployUtils {
     function _provideAndApproveSpecific(bool needToProvide, IERC20Metadata asset_, uint256 amount_, address user_)
         internal
     {
-        if (needToProvide) {
-            dealTokens(asset_, user_, amount_);
-        }
-        vm.startPrank(user_);
-        asset_.forceApprove(address(lpManager), amount_);
-        vm.stopPrank();
+        _provideAndApproveSpecific(needToProvide, asset_, amount_, user_, address(lpManager), address(0));
     }
 
     // TESTS
@@ -329,8 +324,8 @@ abstract contract LPManagerTest is Test, DeployUtils {
             vm.recordLogs();
             (uint256 amount0_, uint256 amount1_) =
                 lpManager.claimFees(interactionInfo.positionId, interactionInfo.from, minAmountOut0_, minAmountOut1_);
-            vm.assertApproxEqAbs(previewClaimFees.amount0, amount0_, amount0_ / controlPrecision);
-            vm.assertApproxEqAbs(previewClaimFees.amount1, amount1_, amount1_ / controlPrecision);
+            vm.assertEq(previewClaimFees.amount0, amount0_);
+            vm.assertEq(previewClaimFees.amount1, amount1_);
             {
                 Vm.Log[] memory entries = vm.getRecordedLogs();
                 bytes32 sig = keccak256(bytes("ClaimedFees(uint256,uint256,uint256)"));

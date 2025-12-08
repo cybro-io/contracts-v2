@@ -3,51 +3,64 @@ pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {AutoManager} from "../src/AutoManager.sol";
+import {AutoManagerV4} from "../src/AutoManagerV4.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ProtocolFeeCollector} from "../src/ProtocolFeeCollector.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
-import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {LPManager} from "../src/LPManager.sol";
-import {BaseLPManager} from "../src/BaseLPManager.sol";
+import {LPManagerV4} from "../src/LPManagerV4.sol";
+import {BaseLPManagerV4} from "../src/BaseLPManagerV4.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PositionInfoLibrary} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey as UniswapPoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
 import {Oracle} from "../src/Oracle.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 
-contract AutoManagerTest is Test, DeployUtils {
+contract AutoManagerV4Test is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
+    using CurrencyLibrary for Currency;
+    using StateLibrary for IPoolManager;
+    using PositionInfoLibrary for PositionInfo;
+    using PoolIdLibrary for UniswapPoolKey;
 
-    AutoManager public autoManager;
-    INonfungiblePositionManager public positionManager;
+    AutoManagerV4 public autoManager;
+    IPositionManager public positionManager;
+    IPoolManager public poolManager;
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
-    LPManager public lpManager;
+    LPManagerV4 public lpManager;
+    address public wrappedNative;
     IOracle public oracle;
     IUniswapV3Factory public factory;
-    address public wrappedNative;
 
     Swapper swapper;
 
     address public admin;
 
+    uint256 public controlPrecision;
+
     struct InteractionInfo {
         uint256 positionId;
-        IERC20Metadata token0;
-        IERC20Metadata token1;
-        uint24 fee;
+        BaseLPManagerV4.PoolKey poolKey;
         int24 tickLower;
         int24 tickUpper;
-        IUniswapV3Pool pool;
         address from;
     }
 
@@ -61,44 +74,68 @@ contract AutoManagerTest is Test, DeployUtils {
 
     function setUp() public virtual {
         admin = baseAdmin;
+        vm.startPrank(admin);
         oracle = IOracle(address(new Oracle(aaveOracle, factory, wrappedNative, admin)));
+        vm.stopPrank();
         _deployAuto();
         swapper = new Swapper();
+        controlPrecision = 100;
     }
 
     function _deployAuto() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        autoManager = new AutoManager(
+        autoManager = new AutoManagerV4(
+            poolManager,
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
             oracle,
             address(admin),
             address(admin)
         );
-        lpManager = new LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
+        lpManager = new LPManagerV4(poolManager, positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
     }
 
-    function _provideAndApproveSpecific(bool needToProvide, IERC20Metadata asset_, uint256 amount_, address user_)
-        internal
-    {
-        _provideAndApproveSpecific(needToProvide, asset_, amount_, user_, address(lpManager), address(autoManager));
+    function _getBalance(address token, address account) internal view returns (uint256) {
+        if (token == address(0)) {
+            return account.balance;
+        } else {
+            return IERC20Metadata(token).balanceOf(account);
+        }
+    }
+
+    function _provideAndApproveSpecific(bool needToProvide, address asset_, uint256 amount_, address user_) internal {
+        _provideAndApproveSpecific(
+            needToProvide, IERC20Metadata(asset_), amount_, user_, address(lpManager), address(autoManager)
+        );
     }
 
     // TESTS
 
     modifier _assertZeroBalances() {
         _;
-        vm.assertEq(interactionInfo.token0.balanceOf(address(autoManager)), 0);
-        vm.assertEq(interactionInfo.token1.balanceOf(address(autoManager)), 0);
+        if (interactionInfo.poolKey.currency0 != address(0)) {
+            vm.assertEq(
+                IERC20Metadata(interactionInfo.poolKey.currency0).balanceOf(address(autoManager)),
+                0,
+                "Non-zero balance token0"
+            );
+        }
+        if (interactionInfo.poolKey.currency1 != address(0)) {
+            vm.assertEq(
+                IERC20Metadata(interactionInfo.poolKey.currency1).balanceOf(address(autoManager)),
+                0,
+                "Non-zero balance token1"
+            );
+        }
     }
 
     // move pool price to accumulate fees in the position
     function _movePoolPrice() internal {
-        uint256 currentPrice = autoManager.getCurrentSqrtPriceX96(address(interactionInfo.pool));
-        uint256 sqrtPriceLower = TickMath.getSqrtRatioAtTick(interactionInfo.tickLower);
-        uint256 sqrtPriceUpper = TickMath.getSqrtRatioAtTick(interactionInfo.tickUpper);
+        uint256 currentPrice = lpManager.getCurrentSqrtPriceX96(interactionInfo.poolKey);
+        uint256 sqrtPriceLower = TickMath.getSqrtPriceAtTick(interactionInfo.tickLower);
+        uint256 sqrtPriceUpper = TickMath.getSqrtPriceAtTick(interactionInfo.tickUpper);
         console.log("currentPrice", currentPrice);
         console.log("sqrtPriceLower", sqrtPriceLower);
         console.log("sqrtPriceUpper", sqrtPriceUpper);
@@ -113,19 +150,8 @@ contract AutoManagerTest is Test, DeployUtils {
         }
         console.log("newPrice", newPrice);
         for (uint256 i = 0; i < 2; i++) {
-            swapper.movePoolPrice(
-                positionManager,
-                address(interactionInfo.token0),
-                address(interactionInfo.token1),
-                interactionInfo.fee,
-                uint160(newPrice)
-            );
-            swapper.movePoolPrice(
-                address(interactionInfo.pool),
-                address(interactionInfo.token0),
-                address(interactionInfo.token1),
-                uint160(currentPrice)
-            );
+            swapper.movePoolPriceV4(poolManager, _cast(interactionInfo.poolKey), uint160(newPrice));
+            swapper.movePoolPriceV4(poolManager, _cast(interactionInfo.poolKey), uint160(currentPrice));
         }
     }
 
@@ -133,36 +159,49 @@ contract AutoManagerTest is Test, DeployUtils {
         return FullMath.mulDiv(amount1, 2 ** 192, uint256(currentPrice) * uint256(currentPrice));
     }
 
+    function _cast(BaseLPManagerV4.PoolKey memory key) internal pure returns (UniswapPoolKey memory uKey) {
+        assembly {
+            uKey := key
+        }
+    }
+
+    function _cast(UniswapPoolKey memory uKey) internal pure returns (BaseLPManagerV4.PoolKey memory key) {
+        assembly {
+            key := uKey
+        }
+    }
+
+    function _assertApproxEqUint(uint256 expected, uint256 actual) internal view {
+        vm.assertApproxEqAbs(expected, actual, actual / controlPrecision);
+    }
+
+    function _assertApproxEqLiquidity(uint128 expected, uint128 actual) internal view {
+        vm.assertApproxEqAbs(expected, actual, uint256(actual) / controlPrecision);
+    }
+
     function _initializePosition(
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
-        IUniswapV3Pool pool_,
+        BaseLPManagerV4.PoolKey memory poolKey_,
         int24 tickLower_,
         int24 tickUpper_,
         int24 newLower_,
         int24 newUpper_
     ) internal {
         interactionInfo = InteractionInfo({
-            positionId: 0,
-            token0: IERC20Metadata(pool_.token0()),
-            token1: IERC20Metadata(pool_.token1()),
-            fee: pool_.fee(),
-            tickLower: tickLower_,
-            tickUpper: tickUpper_,
-            pool: pool_,
-            from: user_
+            positionId: 0, poolKey: poolKey_, tickLower: tickLower_, tickUpper: tickUpper_, from: user_
         });
         console.log("tickLower", interactionInfo.tickLower);
         console.log("tickUpper", interactionInfo.tickUpper);
         console.log("newLower", newLower_);
         console.log("newUpper", newUpper_);
         vm.startPrank(user_);
-        positionManager.setApprovalForAll(address(autoManager), true);
-        positionManager.setApprovalForAll(address(lpManager), true);
+        IERC721(address(positionManager)).setApprovalForAll(address(autoManager), true);
+        IERC721(address(positionManager)).setApprovalForAll(address(lpManager), true);
         vm.stopPrank();
-        _provideAndApproveSpecific(true, interactionInfo.token0, amountIn0_, interactionInfo.from);
-        _provideAndApproveSpecific(true, interactionInfo.token1, amountIn1_, interactionInfo.from);
+        _provideAndApproveSpecific(true, interactionInfo.poolKey.currency0, amountIn0_, interactionInfo.from);
+        _provideAndApproveSpecific(true, interactionInfo.poolKey.currency1, amountIn1_, interactionInfo.from);
         createPosition(amountIn0_, amountIn1_, user_, 1);
         console.log("POSITION CREATED", interactionInfo.positionId);
     }
@@ -171,21 +210,43 @@ contract AutoManagerTest is Test, DeployUtils {
         public
         _assertZeroBalances
     {
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(_cast(interactionInfo.poolKey).toId());
+        console.log("currentPrice", sqrtPriceX96);
+
         vm.startPrank(interactionInfo.from);
+
         PreviewInfo memory previewCreatePosition;
         (previewCreatePosition.liquidity, previewCreatePosition.amount0, previewCreatePosition.amount1) =
             lpManager.previewCreatePosition(
-                address(interactionInfo.pool),
+                interactionInfo.poolKey, amountIn0_, amountIn1_, interactionInfo.tickLower, interactionInfo.tickUpper
+            );
+
+        vm.recordLogs();
+
+        {
+            uint256 snapshotId = vm.snapshotState();
+            lpManager.createPosition{
+                value: interactionInfo.poolKey.currency0 == address(0)
+                    ? amountIn0_
+                    : interactionInfo.poolKey.currency1 == address(0) ? amountIn1_ : 0
+            }(
+                interactionInfo.poolKey,
                 amountIn0_,
                 amountIn1_,
                 interactionInfo.tickLower,
-                interactionInfo.tickUpper
+                interactionInfo.tickUpper,
+                interactionInfo.from,
+                minLiquidity_
             );
-        uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
-        uint256 fee1 = protocolFeeCollector.calculateProtocolFee(amountIn1_, ProtocolFeeCollector.FeeType.LIQUIDITY);
-        vm.recordLogs();
-        (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition(
-            address(interactionInfo.pool),
+            vm.revertToState(snapshotId);
+        }
+
+        (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition{
+            value: interactionInfo.poolKey.currency0 == address(0)
+                ? amountIn0_
+                : interactionInfo.poolKey.currency1 == address(0) ? amountIn1_ : 0
+        }(
+            interactionInfo.poolKey,
             amountIn0_,
             amountIn1_,
             interactionInfo.tickLower,
@@ -193,52 +254,40 @@ contract AutoManagerTest is Test, DeployUtils {
             interactionInfo.from,
             minLiquidity_
         );
+
         vm.stopPrank();
+
         {
             Vm.Log[] memory entries = vm.getRecordedLogs();
             bytes32 sig = keccak256(bytes("PositionCreated(uint256,uint128,uint256,uint256,int24,int24,uint256)"));
             bool found;
             for (uint256 i; i < entries.length; i++) {
-                if (
-                    entries[i].emitter == address(lpManager) && entries[i].topics.length > 0
-                        && entries[i].topics[0] == sig
-                ) {
+                if (entries[i].emitter == address(lpManager) && entries[i].topics[0] == sig) {
                     found = true;
                     break;
                 }
             }
             vm.assertTrue(found, "PositionCreated not emitted");
         }
+
         interactionInfo.positionId = positionId;
         console.log("positionId", positionId);
         console.log("liquidity", liquidity);
-        console.log("amount0 after all", amount0);
-        console.log("amount1 after all", amount1);
-        console.log("amountIn0", amountIn0_);
-        console.log("amountIn1_", amountIn1_);
-        console.log("sqrtPriceX96", lpManager.getCurrentSqrtPriceX96(address(interactionInfo.pool)));
-        console.log("balance of token0", interactionInfo.token0.balanceOf(interactionInfo.from));
-        console.log("balance of token1", interactionInfo.token1.balanceOf(interactionInfo.from));
-
-        vm.assertApproxEqAbs(previewCreatePosition.liquidity, liquidity, liquidity / 100);
-        vm.assertApproxEqAbs(previewCreatePosition.amount0, amount0, amount0 / 100);
-        vm.assertApproxEqAbs(previewCreatePosition.amount1, amount1, amount1 / 100);
-        vm.assertEq(positionManager.ownerOf(positionId), recipient_);
         vm.assertGt(liquidity, 0);
-        vm.assertLt(
-            interactionInfo.token0.balanceOf(interactionInfo.from)
-                + _getAmount1In0(
-                    lpManager.getCurrentSqrtPriceX96(address(interactionInfo.pool)),
-                    interactionInfo.token1.balanceOf(interactionInfo.from)
-                ),
-            (amountIn0_ + _getAmount1In0(lpManager.getCurrentSqrtPriceX96(address(interactionInfo.pool)), amountIn1_))
-                / 300
-        );
-        vm.assertEq(interactionInfo.token0.balanceOf(address(protocolFeeCollector)), fee0);
-        vm.assertEq(interactionInfo.token1.balanceOf(address(protocolFeeCollector)), fee1);
+        vm.assertEq(IERC721(address(positionManager)).ownerOf(positionId), recipient_);
+        _assertApproxEqLiquidity(previewCreatePosition.liquidity, liquidity);
+        _assertApproxEqUint(previewCreatePosition.amount0, amount0);
+        _assertApproxEqUint(previewCreatePosition.amount1, amount1);
+
+        {
+            uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
+            uint256 fee1 = protocolFeeCollector.calculateProtocolFee(amountIn1_, ProtocolFeeCollector.FeeType.LIQUIDITY);
+            vm.assertEq(_getBalance(interactionInfo.poolKey.currency0, address(protocolFeeCollector)), fee0);
+            vm.assertEq(_getBalance(interactionInfo.poolKey.currency1, address(protocolFeeCollector)), fee1);
+        }
     }
 
-    function _getSignatureClaimFees(AutoManager.AutoClaimRequest memory request) public view returns (bytes memory) {
+    function _getSignatureClaimFees(AutoManagerV4.AutoClaimRequest memory request) public view returns (bytes memory) {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(autoManager.AUTO_CLAIM_REQUEST_TYPEHASH(), request));
         console.logBytes32(structHash);
@@ -248,7 +297,7 @@ contract AutoManagerTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureRebalance(AutoManager.AutoRebalanceRequest memory request)
+    function _getSignatureRebalance(AutoManagerV4.AutoRebalanceRequest memory request)
         public
         view
         returns (bytes memory)
@@ -260,7 +309,7 @@ contract AutoManagerTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureClose(AutoManager.AutoCloseRequest memory request) public view returns (bytes memory) {
+    function _getSignatureClose(AutoManagerV4.AutoCloseRequest memory request) public view returns (bytes memory) {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(autoManager.AUTO_CLOSE_REQUEST_TYPEHASH(), request));
         bytes32 digest = MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
@@ -271,7 +320,7 @@ contract AutoManagerTest is Test, DeployUtils {
     function _getDomainSeparator() internal view returns (bytes32) {
         bytes32 typeHash =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-        bytes32 nameHash = keccak256(bytes("AutoManager"));
+        bytes32 nameHash = keccak256(bytes("AutoManagerV4"));
         bytes32 versionHash = keccak256(bytes("1"));
 
         return keccak256(abi.encode(typeHash, nameHash, versionHash, block.chainid, address(autoManager)));
@@ -287,29 +336,23 @@ contract AutoManagerTest is Test, DeployUtils {
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
-        IUniswapV3Pool pool_,
+        BaseLPManagerV4.PoolKey memory poolKey_,
         int24 tickLower_,
         int24 tickUpper_,
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
-        (, int24 currentTick,,,,,) = pool_.slot0();
-        uint160 triggerLower = TickMath.getSqrtRatioAtTick(currentTick - 10 * pool_.tickSpacing());
-        uint160 triggerUpper = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
-        AutoManager.AutoRebalanceRequest memory request = AutoManager.AutoRebalanceRequest({
+        _initializePosition(user_, amountIn0_, amountIn1_, poolKey_, tickLower_, tickUpper_, newLower_, newUpper_);
+        (, int24 currentTick,,) = poolManager.getSlot0(_cast(interactionInfo.poolKey).toId());
+        uint160 triggerLower = TickMath.getSqrtPriceAtTick(currentTick - 10 * interactionInfo.poolKey.tickSpacing);
+        uint160 triggerUpper = TickMath.getSqrtPriceAtTick(currentTick + 10 * interactionInfo.poolKey.tickSpacing);
+        AutoManagerV4.AutoRebalanceRequest memory request = AutoManagerV4.AutoRebalanceRequest({
             positionId: interactionInfo.positionId, triggerLower: triggerLower, triggerUpper: triggerUpper, nonce: 3
         });
         bool need = autoManager.needsRebalance(request);
         console.log("need rebalance", need);
         vm.assertFalse(need);
-        swapper.movePoolPrice(
-            positionManager,
-            address(interactionInfo.token0),
-            address(interactionInfo.token1),
-            interactionInfo.fee,
-            triggerLower - 100
-        );
+        swapper.movePoolPriceV4(poolManager, _cast(interactionInfo.poolKey), triggerLower - 100);
         need = autoManager.needsRebalance(request);
         console.log("need rebalance", need);
         vm.assertTrue(need);
@@ -319,7 +362,7 @@ contract AutoManagerTest is Test, DeployUtils {
         vm.prank(admin);
         autoManager.autoRebalance(request, signature);
         console.log("REBALANCED");
-        LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        LPManagerV4.LPManagerPosition memory position = lpManager.getPosition(interactionInfo.positionId);
         console.log("position.tickLower", position.tickLower);
         console.log("position.tickUpper", position.tickUpper);
         vm.assertEq(position.tickUpper - position.tickLower, tickUpper_ - tickLower_);
@@ -329,21 +372,21 @@ contract AutoManagerTest is Test, DeployUtils {
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
-        IUniswapV3Pool pool_,
+        BaseLPManagerV4.PoolKey memory poolKey_,
         int24 tickLower_,
         int24 tickUpper_,
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
+        _initializePosition(user_, amountIn0_, amountIn1_, poolKey_, tickLower_, tickUpper_, newLower_, newUpper_);
         // claim type TIME
-        AutoManager.AutoClaimRequest memory request = AutoManager.AutoClaimRequest({
+        AutoManagerV4.AutoClaimRequest memory request = AutoManagerV4.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: block.timestamp,
             claimInterval: 1 days,
             claimMinAmountUsd: 0,
             recipient: interactionInfo.from,
-            transferType: BaseLPManager.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV4.TransferInfoInToken.BOTH,
             nonce: 0
         });
         bool need = autoManager.needsClaimFees(request);
@@ -365,13 +408,13 @@ contract AutoManagerTest is Test, DeployUtils {
         vm.revertToState(snapshotId);
 
         // claim type AMOUNT
-        request = AutoManager.AutoClaimRequest({
+        request = AutoManagerV4.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: 0,
             claimInterval: 0,
             claimMinAmountUsd: 1e8,
             recipient: interactionInfo.from,
-            transferType: BaseLPManager.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV4.TransferInfoInToken.BOTH,
             nonce: 1
         });
         need = autoManager.needsClaimFees(request);
@@ -394,33 +437,27 @@ contract AutoManagerTest is Test, DeployUtils {
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
-        IUniswapV3Pool pool_,
+        BaseLPManagerV4.PoolKey memory poolKey_,
         int24 tickLower_,
         int24 tickUpper_,
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
-        (, int24 currentTick,,,,,) = pool_.slot0();
-        uint160 triggerPrice = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
-        AutoManager.AutoCloseRequest memory request = AutoManager.AutoCloseRequest({
+        _initializePosition(user_, amountIn0_, amountIn1_, poolKey_, tickLower_, tickUpper_, newLower_, newUpper_);
+        (, int24 currentTick,,) = poolManager.getSlot0(_cast(interactionInfo.poolKey).toId());
+        uint160 triggerPrice = TickMath.getSqrtPriceAtTick(currentTick + 10 * interactionInfo.poolKey.tickSpacing);
+        AutoManagerV4.AutoCloseRequest memory request = AutoManagerV4.AutoCloseRequest({
             positionId: interactionInfo.positionId,
             triggerPrice: triggerPrice,
             belowOrAbove: false,
             recipient: interactionInfo.from,
-            transferType: BaseLPManager.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV4.TransferInfoInToken.BOTH,
             nonce: 2
         });
         bool need = autoManager.needsClose(request);
         console.log("need close", need);
         vm.assertFalse(need);
-        swapper.movePoolPrice(
-            positionManager,
-            address(interactionInfo.token0),
-            address(interactionInfo.token1),
-            interactionInfo.fee,
-            triggerPrice + 10
-        );
+        swapper.movePoolPriceV4(poolManager, _cast(interactionInfo.poolKey), triggerPrice + 10);
         need = autoManager.needsClose(request);
         console.log("need close", need);
         vm.assertTrue(need);
@@ -433,40 +470,54 @@ contract AutoManagerTest is Test, DeployUtils {
     }
 }
 
-contract AutoManagerTestBaseChain is AutoManagerTest {
-    IUniswapV3Pool public pool;
+contract AutoManagerV4TestBaseChain is AutoManagerV4Test {
+    using StateLibrary for IPoolManager;
+    using PoolIdLibrary for UniswapPoolKey;
+
+    BaseLPManagerV4.PoolKey public key;
 
     function setUp() public override {
-        vm.createSelectFork(vm.rpcUrl("base"), lastCachedBlockid_BASE);
-        positionManager = positionManager_UNI_BASE;
-        pool = IUniswapV3Pool(0xd0b53D9277642d899DF5C87A3966A349A798F224);
+        vm.createSelectFork("base", lastCachedBlockid_BASE);
+        poolManager = poolManager_BASE;
+        positionManager = positionManager_BASE;
         aaveOracle = aaveOracle_BASE;
         factory = IUniswapV3Factory(positionManager_UNI_BASE.factory());
         wrappedNative = address(weth_BASE);
         super.setUp();
     }
 
-    function test2() public {
-        // vm.assume(amountIn0 < 1e20 && amountIn0 > 1e9);
-        // vm.assume(amountIn1 < 8e11 && amountIn1 > 1e6);
+    function test_usdc_eth_v4() public {
+        // poolId: 0xaf15cd1f9c3874bbcfddfc2b544544612c9de8c8bae28ba21c (bytes25)
+        key = BaseLPManagerV4.PoolKey({
+            currency0: address(0), currency1: address(usdc_BASE), fee: 500, tickSpacing: 10, hooks: address(0)
+        });
+
+        uint256 amountIn0 = 1e18;
+        uint256 amountIn1 = 1000e6;
+        _test(amountIn0, amountIn1);
+    }
+
+    function _test(uint256 amountIn0, uint256 amountIn1) public {
         _testGetters();
-        (, int24 currentTick,,,,,) = pool.slot0();
-        int24 tickSpacing = pool.tickSpacing();
+        (uint160 currentPrice, int24 currentTick,,) = poolManager.getSlot0(_cast(key).toId());
+        int24 tickSpacing = key.tickSpacing;
+
         currentTick -= currentTick % tickSpacing;
+        int24 diff = tickSpacing / 10;
+        currentTick -= currentTick % tickSpacing;
+        console.log("tickSpacing", tickSpacing);
         console.log("currentTick", currentTick);
-        uint256 amountIn0 = 2e18;
-        uint256 amountIn1 = 1e10;
-        int24 tickLower = currentTick - tickSpacing * 400;
-        int24 tickUpper = currentTick + tickSpacing * 400;
-        int24 newLower = tickLower + tickSpacing * 6;
-        int24 newUpper = newLower + 4000;
+        int24 tickLower = currentTick + tickSpacing * (20 / diff);
+        int24 tickUpper = tickLower + tickSpacing * (400 / diff);
+        int24 newLower = tickLower + tickSpacing * (40 / diff);
+        int24 newUpper = newLower + tickSpacing * (400 / diff);
 
         uint256 snapshotId = vm.snapshotState();
-        autoClaimFees(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        autoClaimFees(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
 
         vm.revertToState(snapshotId);
-        autoClose(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        autoClose(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
         vm.revertToState(snapshotId);
-        autoRebalance(user, amountIn0, amountIn1, pool, tickLower, tickUpper, newLower, newUpper);
+        autoRebalance(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
     }
 }

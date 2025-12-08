@@ -8,6 +8,10 @@ import {Vm} from "forge-std/Vm.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 
 contract DeployUtils is StdCheats {
     using SafeERC20 for IERC20Metadata;
@@ -70,6 +74,7 @@ contract DeployUtils is StdCheats {
     IERC20Metadata usdc_UNICHAIN = IERC20Metadata(address(0x078D782b760474a361dDA0AF3839290b0EF57AD6));
     IERC20Metadata weth_UNICHAIN = IERC20Metadata(address(0x4200000000000000000000000000000000000006));
     IERC20Metadata wbtc_UNICHAIN = IERC20Metadata(address(0x927B51f251480a681271180DA4de28D44EC4AfB8));
+    IERC20Metadata WBTC_oft_UNICHAIN = IERC20Metadata(address(0x0555E30da8f98308EdB960aa94C0Db47230d2B9c));
 
     /* ============ POOLS ============ */
 
@@ -89,6 +94,22 @@ contract DeployUtils is StdCheats {
     IUniswapV3Pool usdc_weth_UNICHAIN = IUniswapV3Pool(address(0x8927058918e3CFf6F55EfE45A58db1be1F069E49));
     IUniswapV3Pool usdc_weth_005_UNICHAIN = IUniswapV3Pool(address(0x65081CB48d74A32e9CCfED75164b8c09972DBcF1));
     IUniswapV3Pool weth_wbtc_UNICHAIN = IUniswapV3Pool(address(0x1D6ae37DB0e36305019fB3d4bad2750B8784aDF9));
+
+    /* V4 */
+    IAllowanceTransfer permit2 = IAllowanceTransfer(address(0x000000000022D473030F116dDEE9F6B43aC78BA3));
+    IHooks constant HOOOKS_ADDRESS_ZERO = IHooks(address(0));
+
+    /* UNICHAIN */
+    IPoolManager poolManager_UNICHAIN = IPoolManager(address(0x1F98400000000000000000000000000000000004));
+    IPositionManager positionManager_UNICHAIN = IPositionManager(address(0x4529A01c7A0410167c5740C487A8DE60232617bf));
+
+    /* BASE */
+    IPoolManager poolManager_BASE = IPoolManager(address(0x498581fF718922c3f8e6A244956aF099B2652b2b));
+    IPositionManager positionManager_BASE = IPositionManager(address(0x7C5f5A4bBd8fD63184577525326123B519429bDc));
+
+    /* ARBITRUM */
+    IPoolManager poolManager_ARB = IPoolManager(address(0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32));
+    IPositionManager positionManager_ARB = IPositionManager(address(0xd88F38F930b7952f2DB2432Cb002E7abbF3dD869));
 
     /* ============ ASSET PROVIDERS ============ */
 
@@ -113,7 +134,34 @@ contract DeployUtils is StdCheats {
             token.safeTransfer(to, amount);
             vm.stopPrank();
         } else {
-            deal(address(token), to, amount);
+            if (address(token) == address(0)) {
+                deal(to, amount);
+            } else {
+                deal(address(token), to, amount);
+            }
+        }
+    }
+
+    function _provideAndApproveSpecific(
+        bool needToProvide,
+        IERC20Metadata asset_,
+        uint256 amount_,
+        address user_,
+        address lpManager_,
+        address autoManager_
+    ) internal {
+        if (address(asset_) == address(0)) {
+            deal(user_, amount_);
+        } else {
+            if (needToProvide) {
+                dealTokens(asset_, user_, amount_);
+            }
+            vm.startPrank(user_);
+            asset_.forceApprove(lpManager_, amount_);
+            if (autoManager_ != address(0)) {
+                asset_.forceApprove(autoManager_, amount_);
+            }
+            vm.stopPrank();
         }
     }
 }

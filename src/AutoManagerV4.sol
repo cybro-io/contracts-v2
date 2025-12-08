@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
-import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
-import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {IOracle} from "./interfaces/IOracle.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {BaseLPManager} from "./BaseLPManager.sol";
+import {BaseLPManagerV4} from "./BaseLPManagerV4.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-import {IOracle} from "./interfaces/IOracle.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title AutoManager
@@ -21,16 +21,16 @@ import {IOracle} from "./interfaces/IOracle.sol";
  * @dev Verifies EIP712 signed intents by the position owner, evaluates on-chain conditions (price, fees, time) and
  *      executes flows inherited from BaseLPManager.
  */
-contract AutoManager is BaseLPManager, EIP712, AccessControl {
-    using SafeERC20 for IERC20Metadata;
+contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     using ECDSA for bytes32;
+    using StateLibrary for IPoolManager;
 
     /* ============ TYPES ============ */
 
     /// @notice EIP-712 typed request to automatically close a position by withdrawing 100%
     /// @dev Triggers when current sqrtPriceX96 crosses the configured threshold
     struct AutoCloseRequest {
-        /// @notice Uniswap V3 position NFT id to operate on
+        /// @notice Uniswap position NFT id to operate on
         uint256 positionId;
         /// @notice Sqrt price threshold in Q96 (sqrtPriceX96) to trigger close
         uint160 triggerPrice;
@@ -53,7 +53,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         uint256 initialTimestamp;
         /// @notice Minimal seconds between successive auto-claims
         uint256 claimInterval;
-        /// @notice Minimal fees value to claim in oracle base currency (e.g., USD)
+        /// @notice Minimal fees value to claim in oracle base currency (e.g., USD), scaled by IAaveOracle.BASE_CURRENCY_UNIT
         uint256 claimMinAmountUsd;
         /// @notice Recipient of the claimed fees after protocol fee and optional swap
         address recipient;
@@ -90,10 +90,13 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     /// @notice Thrown when the auto action is not needed
     error NotNeededAutoAction();
 
+    /// @notice Thrown when the price is not available
+    error NoPrice();
+
     /* ============ CONSTANTS ============ */
 
     /// @notice Maximum allowed deviation from the trusted price (10%)
-    uint32 public constant maxDeviation = 1000;
+    uint32 public constant MAX_DEVIATION = 1000;
 
     bytes32 public constant AUTO_CLAIM_REQUEST_TYPEHASH = keccak256(
         "AutoClaimRequest(uint256 positionId,uint256 initialTimestamp,uint256 claimInterval,uint256 claimMinAmountUsd,address recipient,uint8 transferType, uint256 nonce)"
@@ -120,20 +123,23 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     /* ============ CONSTRUCTOR ============ */
 
     /**
-     * @notice Initializes the contract
-     * @param _positionManager Uniswap V3 NonfungiblePositionManager
-     * @param _protocolFeeCollector Protocol fee collector
-     * @param _oracle External price oracle
-     * @param admin Address to be granted DEFAULT_ADMIN_ROLE
-     * @param autoManager Address to be granted AUTO_MANAGER_ROLE
+     * @notice Initializes the AutoManagerV4 contract with necessary dependencies and role assignments.
+     * @dev Sets up EIP-712 domain separator with name "AutoManagerV4" and version "1".
+     * @param _poolManager Uniswap V4 pool manager contract.
+     * @param _positionManager Uniswap V4 position manager contract.
+     * @param _protocolFeeCollector Protocol fee collector contract for fee management.
+     * @param _oracle External price oracle for fetching asset prices and validation.
+     * @param admin Address to be granted DEFAULT_ADMIN_ROLE.
+     * @param autoManager Address to be granted AUTO_MANAGER_ROLE for executing automated operations.
      */
     constructor(
-        INonfungiblePositionManager _positionManager,
+        IPoolManager _poolManager,
+        IPositionManager _positionManager,
         IProtocolFeeCollector _protocolFeeCollector,
         IOracle _oracle,
         address admin,
         address autoManager
-    ) EIP712("AutoManager", "1") BaseLPManager(_positionManager, _protocolFeeCollector) {
+    ) EIP712("AutoManagerV4", "1") BaseLPManagerV4(_poolManager, _positionManager, _protocolFeeCollector) {
         oracle = _oracle;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(AUTO_MANAGER_ROLE, autoManager);
@@ -142,7 +148,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     /* ============ EXTERNAL FUNCTIONS ============ */
 
     /**
-     * @notice Sets the Oracle that implements the IOracle interface
+     * @notice Sets the Oracle that implements the IAaveOracle interface
      * @param _oracle The Oracle to set
      */
     function setOracle(IOracle _oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -166,7 +172,10 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         external
         onlyRole(AUTO_MANAGER_ROLE)
     {
+        // Verify claim conditions are met (time interval or minimum USD value)
         require(needsClaimFees(request), NotNeededAutoAction());
+
+        // Validate signature from position owner
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLAIM_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
@@ -180,7 +189,10 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      * @param signature EIP-712 signature by the current position owner
      */
     function autoClose(AutoCloseRequest calldata request, bytes memory signature) external onlyRole(AUTO_MANAGER_ROLE) {
+        // Verify price trigger condition is met
         require(needsClose(request), NotNeededAutoAction());
+
+        // Validate signature from position owner
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLOSE_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
@@ -196,24 +208,27 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         external
         onlyRole(AUTO_MANAGER_ROLE)
     {
+        // Verify rebalance trigger condition is met (price outside bounds)
         require(needsRebalance(request), NotNeededAutoAction());
+
+        // Validate signature from position owner and get owner address
         address owner = _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_REBALANCE_REQUEST_TYPEHASH, request))),
             signature,
             request.positionId
         );
         PositionContext memory ctx = _getPositionContext(request.positionId);
-        _checkPriceManipulation(ctx.poolInfo);
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(ctx.poolInfo.pool).slot0();
+        _checkPriceManipulation(ctx.poolKey);
+        (, int24 currentTick,,) = poolManager.getSlot0(_toId(ctx.poolKey));
         int24 newLower;
         int24 newUpper;
         {
-            int24 tickSpacing = IUniswapV3Pool(ctx.poolInfo.pool).tickSpacing();
+            // Calculate new range centered on current tick with same width as before
             int24 widthTicks = ctx.tickUpper - ctx.tickLower;
             newLower = currentTick - widthTicks / 2;
-            newLower -= newLower % tickSpacing;
+            newLower -= newLower % ctx.poolKey.tickSpacing;
             newUpper = currentTick + widthTicks / 2;
-            newUpper -= newUpper % tickSpacing;
+            newUpper -= newUpper % ctx.poolKey.tickSpacing;
         }
         _moveRange(request.positionId, newLower, newUpper, owner, 0, owner);
     }
@@ -226,6 +241,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      * @return True if claim should be executed now
      */
     function needsClaimFees(AutoClaimRequest calldata request) public view returns (bool) {
+        // Check time-based trigger: has enough time passed since last claim?
         if ((request.initialTimestamp > 0 && request.claimInterval > 0)) {
             uint256 nextClaimTimestamp =
                 (request.initialTimestamp > lastAutoClaim[request.positionId]
@@ -235,14 +251,17 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
                 return true;
             }
         }
+
+        // Check amount-based trigger: do accumulated fees exceed minimum USD threshold?
         if (request.claimMinAmountUsd > 0) {
-            PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
+            PoolKey memory poolKey = _getPoolKey(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
             (uint256 price0, uint256 price1) =
-                oracle.getPricesOfTwoAssets(poolInfo.token0, poolInfo.token1, poolInfo.pool);
+                oracle.getPricesOfTwoAssets(poolKey.currency0, poolKey.currency1, address(0));
 
-            uint256 feesUsd = FullMath.mulDiv(fees0, price0, IERC20Metadata(poolInfo.token0).decimals())
-                + FullMath.mulDiv(fees1, price1, IERC20Metadata(poolInfo.token1).decimals());
+            // Calculate total fee value in USD
+            uint256 feesUsd = FullMath.mulDiv(fees0, price0, _getDecimals(poolKey.currency0))
+                + FullMath.mulDiv(fees1, price1, _getDecimals(poolKey.currency1));
 
             return feesUsd >= request.claimMinAmountUsd;
         }
@@ -255,8 +274,8 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      * @return True if close should be executed now
      */
     function needsClose(AutoCloseRequest memory request) public view returns (bool) {
-        PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
-        uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(poolInfo.pool));
+        PoolKey memory poolKey = _getPoolKey(request.positionId);
+        uint160 currentSqrt = getCurrentSqrtPriceX96(poolKey);
         return request.belowOrAbove ? currentSqrt <= request.triggerPrice : currentSqrt >= request.triggerPrice;
     }
 
@@ -267,7 +286,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      */
     function needsRebalance(AutoRebalanceRequest memory request) public view returns (bool) {
         PositionContext memory ctx = _getPositionContext(request.positionId);
-        uint160 currentSqrt = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
+        uint160 currentSqrt = getCurrentSqrtPriceX96(ctx.poolKey);
         if (currentSqrt > request.triggerUpper || currentSqrt < request.triggerLower) {
             return true;
         }
@@ -288,24 +307,28 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         view
         returns (address owner)
     {
-        owner = positionManager.ownerOf(positionId);
+        owner = IERC721(address(positionManager)).ownerOf(positionId);
+
+        // Recover signer from signature and verify it matches the owner
         require(digest.recover(signature) == owner, InvalidSignature());
+
+        // Check that the owner hasn't invalidated this specific digest
         require(!digests[owner][digest], InvalidDigest());
     }
 
     /**
      * @notice Function to check if the price of the Dex pool is being manipulated
-     * @param poolInfo Pool info
+     * @param poolKey Pool key
      */
-    function _checkPriceManipulation(PoolInfo memory poolInfo) internal view {
+    function _checkPriceManipulation(PoolKey memory poolKey) internal view {
         uint256 trustedSqrtPrice;
-        try oracle.getSqrtPriceX96(poolInfo.token0, poolInfo.token1, poolInfo.pool) returns (uint160 price) {
+        try oracle.getSqrtPriceX96(poolKey.currency0, poolKey.currency1, address(0)) returns (uint160 price) {
             trustedSqrtPrice = uint256(price);
         } catch {
             return;
         }
-        uint256 currentSqrtPrice = getCurrentSqrtPriceX96(poolInfo.pool);
-        uint256 deviation = FullMath.mulDiv(currentSqrtPrice ** 2, PRECISION, trustedSqrtPrice ** 2);
-        require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
+        uint256 deviation =
+            FullMath.mulDiv(uint256(getCurrentSqrtPriceX96(poolKey)) ** 2, PRECISION, trustedSqrtPrice ** 2);
+        require((deviation > PRECISION - MAX_DEVIATION) && (deviation < PRECISION + MAX_DEVIATION), PriceManipulation());
     }
 }
