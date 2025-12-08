@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {IAaveOracle} from "./interfaces/IAaveOracle.sol";
+import {IOracle} from "./interfaces/IOracle.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {BaseLPManagerV4} from "./BaseLPManagerV4.sol";
@@ -13,6 +13,7 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title AutoManager
@@ -109,15 +110,10 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     /// @notice Role identifier allowed to execute automated flows (`auto*` functions)
     bytes32 public constant AUTO_MANAGER_ROLE = keccak256("AUTO_MANAGER_ROLE");
 
-    /// @notice Wrapped native currency address(e.g. WETH)
-    address public immutable wrappedNative;
-
     /* ============ STATE VARIABLES ============ */
 
     /// @notice External price oracle used to fetch asset prices
-    IAaveOracle public aaveOracle;
-    /// @notice Base currency unit of the oracle (as returned by `IAaveOracle.BASE_CURRENCY_UNIT()`)
-    uint256 public baseCurrencyUnit;
+    IOracle public oracle;
 
     /// @notice Last successful auto-claim timestamp per position id
     mapping(uint256 positionId => uint256 timestamp) public lastAutoClaim;
@@ -132,36 +128,31 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
      * @param _poolManager Uniswap V4 pool manager contract.
      * @param _positionManager Uniswap V4 position manager contract.
      * @param _protocolFeeCollector Protocol fee collector contract for fee management.
-     * @param _aaveOracle Aave price oracle for fetching asset prices and validation.
+     * @param _oracle External price oracle for fetching asset prices and validation.
      * @param admin Address to be granted DEFAULT_ADMIN_ROLE.
      * @param autoManager Address to be granted AUTO_MANAGER_ROLE for executing automated operations.
-     * @param _wrappedNative Address of wrapped native token (e.g., WETH) for oracle price lookups.
      */
     constructor(
         IPoolManager _poolManager,
         IPositionManager _positionManager,
         IProtocolFeeCollector _protocolFeeCollector,
-        IAaveOracle _aaveOracle,
+        IOracle _oracle,
         address admin,
-        address autoManager,
-        address _wrappedNative
+        address autoManager
     ) EIP712("AutoManagerV4", "1") BaseLPManagerV4(_poolManager, _positionManager, _protocolFeeCollector) {
-        aaveOracle = _aaveOracle;
-        baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
+        oracle = _oracle;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(AUTO_MANAGER_ROLE, autoManager);
-        wrappedNative = _wrappedNative;
     }
 
     /* ============ EXTERNAL FUNCTIONS ============ */
 
     /**
      * @notice Sets the Oracle that implements the IAaveOracle interface
-     * @param _aaveOracle The Oracle to set
+     * @param _oracle The Oracle to set
      */
-    function setAaveOracle(IAaveOracle _aaveOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        aaveOracle = _aaveOracle;
-        baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
+    function setOracle(IOracle _oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        oracle = _oracle;
     }
 
     /**
@@ -265,13 +256,12 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         if (request.claimMinAmountUsd > 0) {
             PoolKey memory poolKey = _getPoolKey(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
-            (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
-            if (price0 == 0 || price1 == 0) {
-                revert NoPrice();
-            }
+            (uint256 price0, uint256 price1) =
+                oracle.getPricesOfTwoAssets(poolKey.currency0, poolKey.currency1, address(0));
 
             // Calculate total fee value in USD
-            uint256 feesUsd = FullMath.mulDiv(fees0, price0, decimals0) + FullMath.mulDiv(fees1, price1, decimals1);
+            uint256 feesUsd = FullMath.mulDiv(fees0, price0, _getDecimals(poolKey.currency0))
+                + FullMath.mulDiv(fees1, price1, _getDecimals(poolKey.currency1));
 
             return feesUsd >= request.claimMinAmountUsd;
         }
@@ -331,59 +321,14 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
      * @param poolKey Pool key
      */
     function _checkPriceManipulation(PoolKey memory poolKey) internal view {
-        uint256 trustedSqrtPrice = _getTrustedSqrtPrice(poolKey);
-        if (trustedSqrtPrice == 0) {
+        uint256 trustedSqrtPrice;
+        try oracle.getSqrtPriceX96(poolKey.currency0, poolKey.currency1, address(0)) returns (uint160 price) {
+            trustedSqrtPrice = uint256(price);
+        } catch {
             return;
         }
         uint256 deviation =
             FullMath.mulDiv(uint256(getCurrentSqrtPriceX96(poolKey)) ** 2, PRECISION, trustedSqrtPrice ** 2);
         require((deviation > PRECISION - MAX_DEVIATION) && (deviation < PRECISION + MAX_DEVIATION), PriceManipulation());
-    }
-
-    /**
-     * @notice Returns a "trusted" sqrtPriceX96 for the pool
-     * @param poolKey Pool key
-     * @return trustedSqrtPrice Trusted sqrt price in Q96 format (sqrtPriceX96)
-     */
-    function _getTrustedSqrtPrice(PoolKey memory poolKey) internal view returns (uint256 trustedSqrtPrice) {
-        (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
-        if (price0 == 0 || price1 == 0) {
-            return 0;
-        }
-        trustedSqrtPrice = Math.sqrt(FullMath.mulDiv(price0, 2 ** 96, price1))
-            * Math.sqrt(FullMath.mulDiv(decimals1, 2 ** 96, decimals0));
-    }
-
-    /**
-     * @notice Fetches token prices from the Aave oracle and calculates decimal multipliers.
-     * @dev Queries oracle prices for both tokens using `IAaveOracle.getAssetPrice`.
-     *      For native ETH (address(0)), uses wrappedNative address for oracle lookup.
-     * @param poolKey Pool key containing currency pair information.
-     * @return price0 Token0 price in oracle base currency (e.g., USD with 8 decimals).
-     * @return price1 Token1 price in oracle base currency.
-     * @return decimals0 Decimal multiplier for token0 (10^decimals).
-     * @return decimals1 Decimal multiplier for token1 (10^decimals).
-     */
-    function _getPricesFromOracles(PoolKey memory poolKey)
-        internal
-        view
-        returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
-    {
-        // Fetch price for token0 (use wrapped native if currency is address(0))
-        try aaveOracle.getAssetPrice(poolKey.currency0 == address(0) ? wrappedNative : poolKey.currency0) returns (
-            uint256 price0_
-        ) {
-            price0 = price0_;
-        } catch {}
-
-        // Fetch price for token1 (use wrapped native if currency is address(0))
-        try aaveOracle.getAssetPrice(poolKey.currency1 == address(0) ? wrappedNative : poolKey.currency1) returns (
-            uint256 price1_
-        ) {
-            price1 = price1_;
-        } catch {}
-
-        decimals0 = 10 ** _getDecimals(poolKey.currency0);
-        decimals1 = 10 ** _getDecimals(poolKey.currency1);
     }
 }

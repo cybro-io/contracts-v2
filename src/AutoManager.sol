@@ -8,12 +8,12 @@ import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Po
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
-import {IAaveOracle} from "./interfaces/IAaveOracle.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {BaseLPManager} from "./BaseLPManager.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {IOracle} from "./interfaces/IOracle.sol";
 
 /**
  * @title AutoManager
@@ -53,7 +53,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         uint256 initialTimestamp;
         /// @notice Minimal seconds between successive auto-claims
         uint256 claimInterval;
-        /// @notice Minimal fees value to claim in oracle base currency (e.g., USD), scaled by IAaveOracle.BASE_CURRENCY_UNIT
+        /// @notice Minimal fees value to claim in oracle base currency (e.g., USD)
         uint256 claimMinAmountUsd;
         /// @notice Recipient of the claimed fees after protocol fee and optional swap
         address recipient;
@@ -90,9 +90,6 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     /// @notice Thrown when the auto action is not needed
     error NotNeededAutoAction();
 
-    /// @notice Thrown when the price is not available
-    error NoPrice();
-
     /* ============ CONSTANTS ============ */
 
     /// @notice Maximum allowed deviation from the trusted price (10%)
@@ -113,9 +110,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     /* ============ STATE VARIABLES ============ */
 
     /// @notice External price oracle used to fetch asset prices
-    IAaveOracle public aaveOracle;
-    /// @notice Base currency unit of the oracle (as returned by `IAaveOracle.BASE_CURRENCY_UNIT()`)
-    uint256 public baseCurrencyUnit;
+    IOracle public oracle;
 
     /// @notice Last successful auto-claim timestamp per position id
     mapping(uint256 positionId => uint256 timestamp) public lastAutoClaim;
@@ -128,19 +123,18 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
      * @notice Initializes the contract
      * @param _positionManager Uniswap V3 NonfungiblePositionManager
      * @param _protocolFeeCollector Protocol fee collector
-     * @param _aaveOracle Aave price oracle
+     * @param _oracle External price oracle
      * @param admin Address to be granted DEFAULT_ADMIN_ROLE
      * @param autoManager Address to be granted AUTO_MANAGER_ROLE
      */
     constructor(
         INonfungiblePositionManager _positionManager,
         IProtocolFeeCollector _protocolFeeCollector,
-        IAaveOracle _aaveOracle,
+        IOracle _oracle,
         address admin,
         address autoManager
     ) EIP712("AutoManager", "1") BaseLPManager(_positionManager, _protocolFeeCollector) {
-        aaveOracle = _aaveOracle;
-        baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
+        oracle = _oracle;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(AUTO_MANAGER_ROLE, autoManager);
     }
@@ -148,12 +142,11 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     /* ============ EXTERNAL FUNCTIONS ============ */
 
     /**
-     * @notice Sets the Oracle that implements the IAaveOracle interface
-     * @param _aaveOracle The Oracle to set
+     * @notice Sets the Oracle that implements the IOracle interface
+     * @param _oracle The Oracle to set
      */
-    function setAaveOracle(IAaveOracle _aaveOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        aaveOracle = _aaveOracle;
-        baseCurrencyUnit = _aaveOracle.BASE_CURRENCY_UNIT();
+    function setOracle(IOracle _oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        oracle = _oracle;
     }
 
     /**
@@ -245,9 +238,11 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         if (request.claimMinAmountUsd > 0) {
             PoolInfo memory poolInfo = _getPoolInfoById(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
-            (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesToUsd(poolInfo);
+            (uint256 price0, uint256 price1) =
+                oracle.getPricesOfTwoAssets(poolInfo.token0, poolInfo.token1, poolInfo.pool);
 
-            uint256 feesUsd = FullMath.mulDiv(fees0, price0, decimals0) + FullMath.mulDiv(fees1, price1, decimals1);
+            uint256 feesUsd = FullMath.mulDiv(fees0, price0, IERC20Metadata(poolInfo.token0).decimals())
+                + FullMath.mulDiv(fees1, price1, IERC20Metadata(poolInfo.token1).decimals());
 
             return feesUsd >= request.claimMinAmountUsd;
         }
@@ -299,115 +294,18 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
     }
 
     /**
-     * @notice Calculates the TWAP (Time-Weighted Average Price) of the Dex pool
-     * @dev This function calculates the average price of the Dex pool over a last 30 minutes
-     * @param pool The address of the pool
-     * @return The TWAP of the Dex pool
-     */
-    function _getTwap(address pool) internal view returns (uint256) {
-        uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = 0;
-        secondsAgos[1] = 1800;
-
-        (int56[] memory tickCumulatives,) = IUniswapV3Pool(pool).observe(secondsAgos);
-        int56 tickCumulativeDelta = tickCumulatives[0] - tickCumulatives[1];
-        int56 timeElapsed = int56(uint56(secondsAgos[1]));
-
-        int24 averageTick = int24(tickCumulativeDelta / timeElapsed);
-        if (tickCumulativeDelta < 0 && (tickCumulativeDelta % timeElapsed != 0)) {
-            averageTick--;
-        }
-
-        return uint256(TickMath.getSqrtRatioAtTick(averageTick));
-    }
-
-    /**
      * @notice Function to check if the price of the Dex pool is being manipulated
      * @param poolInfo Pool info
      */
     function _checkPriceManipulation(PoolInfo memory poolInfo) internal view {
-        uint256 trustedSqrtPrice = _getTrustedSqrtPrice(poolInfo);
+        uint256 trustedSqrtPrice;
+        try oracle.getSqrtPriceX96(poolInfo.token0, poolInfo.token1, poolInfo.pool) returns (uint160 price) {
+            trustedSqrtPrice = uint256(price);
+        } catch {
+            return;
+        }
         uint256 currentSqrtPrice = getCurrentSqrtPriceX96(poolInfo.pool);
         uint256 deviation = FullMath.mulDiv(currentSqrtPrice ** 2, PRECISION, trustedSqrtPrice ** 2);
         require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
-    }
-
-    /**
-     * @notice Returns a "trusted" sqrtPriceX96 for the pool
-     * @dev Pulls `price0` and `price1` from the Aave oracle. If either price is unavailable (zero),
-     *      falls back to the pool 30‑minute TWAP. The formula computes sqrt(price1/price0) in Q96 and
-     *      adjusts it by token decimals so that the result matches Uniswap V3 sqrtPriceX96 semantics.
-     * @param poolInfo Pool metadata (tokens and fee)
-     * @return trustedSqrtPrice Trusted sqrt price in Q96 format (sqrtPriceX96)
-     */
-    function _getTrustedSqrtPrice(PoolInfo memory poolInfo) internal view returns (uint256 trustedSqrtPrice) {
-        (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolInfo);
-
-        if (price0 == 0 || price1 == 0) {
-            return _getTwap(poolInfo.pool);
-        }
-
-        return
-            Math.sqrt(FullMath.mulDiv(price0, 2 ** 96, price1))
-                * Math.sqrt(FullMath.mulDiv(decimals1, 2 ** 96, decimals0));
-    }
-
-    /**
-     * @notice Fetches token prices from the Aave oracle and their decimal multipliers
-     * @dev Prices are read via `IAaveOracle.getAssetPrice`
-     * @param poolInfo Pool metadata (tokens and fee)
-     * @return price0 Token0 price in the oracle base
-     * @return price1 Token1 price in the oracle base
-     * @return decimals0 10**decimals(token0)
-     * @return decimals1 10**decimals(token1)
-     */
-    function _getPricesFromOracles(PoolInfo memory poolInfo)
-        internal
-        view
-        returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
-    {
-        try aaveOracle.getAssetPrice(poolInfo.token0) returns (uint256 price0_) {
-            price0 = price0_;
-        } catch {}
-
-        try aaveOracle.getAssetPrice(poolInfo.token1) returns (uint256 price1_) {
-            price1 = price1_;
-        } catch {}
-
-        decimals0 = 10 ** IERC20Metadata(poolInfo.token0).decimals();
-        decimals1 = 10 ** IERC20Metadata(poolInfo.token1).decimals();
-    }
-
-    /**
-     * @notice Returns token prices in a unified base (e.g. USD), with TWAP-based fallback if one feed is missing
-     * @dev If both Aave prices are available, they are returned as-is with decimal multipliers.
-     *      If one token's price is missing (zero), it is derived from the other token's price and the current
-     *      pool TWAP using the formulas:
-     *        price0 ≈ (decimals0 * twap^2 / 2^192) * price1 / decimals1
-     *        price1 ≈ (decimals1 * 2^192 / twap^2) * price0 / decimals0
-     * @param poolInfo Pool metadata (tokens and fee)
-     * @return price0 Token0 price in the oracle base (or TWAP-derived)
-     * @return price1 Token1 price in the oracle base (or TWAP-derived)
-     * @return decimals0 10**decimals(token0)
-     * @return decimals1 10**decimals(token1)
-     */
-    function _getPricesToUsd(PoolInfo memory poolInfo)
-        internal
-        view
-        returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
-    {
-        (price0, price1, decimals0, decimals1) = _getPricesFromOracles(poolInfo);
-
-        if (price0 == 0) {
-            if (price1 == 0) {
-                revert NoPrice();
-            } else {
-                uint256 twap = _getTwap(poolInfo.pool);
-                price0 = FullMath.mulDiv(FullMath.mulDiv(decimals0, twap * twap, 2 ** 192), price1, decimals1);
-            }
-        } else if (price1 == 0) {
-            uint256 twap = _getTwap(poolInfo.pool);
-            price1 = FullMath.mulDiv(FullMath.mulDiv(decimals1, 2 ** 192, twap * twap), price0, decimals0);
-        }
     }
 }

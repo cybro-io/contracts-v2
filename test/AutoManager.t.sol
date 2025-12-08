@@ -20,6 +20,9 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {LPManager} from "../src/LPManager.sol";
 import {BaseLPManager} from "../src/BaseLPManager.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IOracle} from "../src/interfaces/IOracle.sol";
+import {Oracle} from "../src/Oracle.sol";
+import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 
 contract AutoManagerTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
@@ -29,6 +32,9 @@ contract AutoManagerTest is Test, DeployUtils {
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
     LPManager public lpManager;
+    IOracle public oracle;
+    IUniswapV3Factory public factory;
+    address public wrappedNative;
 
     Swapper swapper;
 
@@ -55,6 +61,7 @@ contract AutoManagerTest is Test, DeployUtils {
 
     function setUp() public virtual {
         admin = baseAdmin;
+        oracle = IOracle(address(new Oracle(aaveOracle, factory, wrappedNative, admin)));
         _deployAuto();
         swapper = new Swapper();
     }
@@ -65,7 +72,7 @@ contract AutoManagerTest is Test, DeployUtils {
         autoManager = new AutoManager(
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
-            aaveOracle,
+            oracle,
             address(admin),
             address(admin)
         );
@@ -271,10 +278,9 @@ contract AutoManagerTest is Test, DeployUtils {
     }
 
     function _testGetters() public {
-        vm.assertEq(address(autoManager.aaveOracle()), address(aaveOracle));
-        vm.assertEq(autoManager.baseCurrencyUnit(), aaveOracle.BASE_CURRENCY_UNIT());
+        vm.assertEq(address(autoManager.oracle()), address(oracle));
         vm.expectRevert();
-        autoManager.setAaveOracle(IAaveOracle(address(100010)));
+        autoManager.setOracle(IOracle(address(100010)));
     }
 
     function autoRebalance(
@@ -435,6 +441,8 @@ contract AutoManagerTestBaseChain is AutoManagerTest {
         positionManager = positionManager_UNI_BASE;
         pool = IUniswapV3Pool(0xd0b53D9277642d899DF5C87A3966A349A798F224);
         aaveOracle = aaveOracle_BASE;
+        factory = IUniswapV3Factory(positionManager_UNI_BASE.factory());
+        wrappedNative = address(weth_BASE);
         super.setUp();
     }
 

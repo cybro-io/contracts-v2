@@ -29,6 +29,9 @@ import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey as UniswapPoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IOracle} from "../src/interfaces/IOracle.sol";
+import {Oracle} from "../src/Oracle.sol";
+import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 
 contract AutoManagerV4Test is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
@@ -44,6 +47,8 @@ contract AutoManagerV4Test is Test, DeployUtils {
     IAaveOracle public aaveOracle;
     LPManagerV4 public lpManager;
     address public wrappedNative;
+    IOracle public oracle;
+    IUniswapV3Factory public factory;
 
     Swapper swapper;
 
@@ -69,6 +74,9 @@ contract AutoManagerV4Test is Test, DeployUtils {
 
     function setUp() public virtual {
         admin = baseAdmin;
+        vm.startPrank(admin);
+        oracle = IOracle(address(new Oracle(aaveOracle, factory, wrappedNative, admin)));
+        vm.stopPrank();
         _deployAuto();
         swapper = new Swapper();
         controlPrecision = 100;
@@ -81,10 +89,9 @@ contract AutoManagerV4Test is Test, DeployUtils {
             poolManager,
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
-            aaveOracle,
+            oracle,
             address(admin),
-            address(admin),
-            address(wrappedNative)
+            address(admin)
         );
         lpManager = new LPManagerV4(poolManager, positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
@@ -320,10 +327,9 @@ contract AutoManagerV4Test is Test, DeployUtils {
     }
 
     function _testGetters() public {
-        vm.assertEq(address(autoManager.aaveOracle()), address(aaveOracle));
-        vm.assertEq(autoManager.baseCurrencyUnit(), aaveOracle.BASE_CURRENCY_UNIT());
+        vm.assertEq(address(autoManager.oracle()), address(oracle));
         vm.expectRevert();
-        autoManager.setAaveOracle(IAaveOracle(address(100010)));
+        autoManager.setOracle(IOracle(address(100010)));
     }
 
     function autoRebalance(
@@ -475,6 +481,7 @@ contract AutoManagerV4TestBaseChain is AutoManagerV4Test {
         poolManager = poolManager_BASE;
         positionManager = positionManager_BASE;
         aaveOracle = aaveOracle_BASE;
+        factory = IUniswapV3Factory(positionManager_UNI_BASE.factory());
         wrappedNative = address(weth_BASE);
         super.setUp();
     }
