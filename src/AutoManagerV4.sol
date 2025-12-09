@@ -350,6 +350,19 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         require((deviation > PRECISION - MAX_DEVIATION) && (deviation < PRECISION + MAX_DEVIATION), PriceManipulation());
     }
 
+    /**
+     * @notice Returns token prices in a unified base (e.g. USD), with TWAP-based fallback if one feed is missing
+     * @dev If both prices are available, they are returned as-is with decimal multipliers.
+     *      If one token's price is missing (zero), it is derived from the other token's price and the current
+     *      pool price using the formulas:
+     *        price0 ≈ (decimals0 * currentSqrt^2 / 2^192) * price1 / decimals1
+     *        price1 ≈ (decimals1 * 2^192 / currentSqrt^2) * price0 / decimals0
+     * @param poolKey Pool key
+     * @return price0 Token0 price in the oracle base (or currentSqrt-derived)
+     * @return price1 Token1 price in the oracle base (or currentSqrt-derived)
+     * @return decimals0 10**decimals(token0)
+     * @return decimals1 10**decimals(token1)
+     */
     function _getPricesToUsd(PoolKey memory poolKey)
         internal
         view

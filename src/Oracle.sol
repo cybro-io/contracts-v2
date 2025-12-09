@@ -46,7 +46,13 @@ contract Oracle is AccessControl, IOracle {
 
     /* ============ EXTERNAL VIEW FUNCTIONS ============ */
 
+    /**
+     * @notice Returns the price of an asset
+     * @param asset The asset address
+     * @return The price of the asset
+     */
     function getAssetPrice(address asset) public view override returns (uint256) {
+        // if we have a chainlink oracle for the asset, return the price
         if (address(oracles[asset]) != address(0)) {
             if (oracles[asset].decimals() != BASE_CURRENCY_DECIMALS) {
                 return
@@ -56,6 +62,7 @@ contract Oracle is AccessControl, IOracle {
             }
             return oracles[asset].getPrice();
         }
+        // if we don't have a chainlink oracle for the asset, try the Aave oracle
         try primaryOracle.getAssetPrice(asset == address(0) ? wrappedNative : asset) returns (uint256 price) {
             if (price > 0) {
                 return price;
@@ -64,6 +71,11 @@ contract Oracle is AccessControl, IOracle {
         return 0;
     }
 
+    /**
+     * @notice Returns the prices of a list of assets
+     * @param assets List of asset addresses
+     * @return The prices of the assets
+     */
     function getAssetsPrices(address[] memory assets) external view override returns (uint256[] memory) {
         uint256[] memory prices = new uint256[](assets.length);
         for (uint256 i = 0; i < assets.length; i++) {
@@ -72,6 +84,12 @@ contract Oracle is AccessControl, IOracle {
         return prices;
     }
 
+    /**
+     * @notice Returns the sqrt price of two assets
+     * @param asset0 The first asset
+     * @param asset1 The second asset
+     * @return The sqrt price of the two assets
+     */
     function getSqrtPriceX96(address asset0, address asset1) external view override returns (uint160) {
         if (asset0 > asset1) {
             (asset0, asset1) = (asset1, asset0);
@@ -102,10 +120,19 @@ contract Oracle is AccessControl, IOracle {
 
     /* ============ ADMIN FUNCTIONS ============ */
 
+    /**
+     * @notice Sets the primary Aave oracle
+     * @param _primaryOracle The primary Aave oracle
+     */
     function setPrimaryOracle(IAaveOracle _primaryOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         primaryOracle = _primaryOracle;
     }
 
+    /**
+     * @notice Sets the Chainlink oracles for a list of tokens
+     * @param tokens_ List of token addresses
+     * @param oracles_ List of Chainlink oracles
+     */
     function setOracles(address[] calldata tokens_, IChainlinkOracle[] calldata oracles_)
         external
         onlyRole(MANAGER_ROLE)
