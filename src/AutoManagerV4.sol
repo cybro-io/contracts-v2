@@ -256,9 +256,7 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         if (request.claimMinAmountUsd > 0) {
             PoolKey memory poolKey = _getPoolKey(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
-            (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
-
-            require(price0 != 0 && price1 != 0, NoPrice());
+            (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesToUsd(poolKey);
 
             // Calculate total fee value in USD
             uint256 feesUsd = FullMath.mulDiv(fees0, price0, decimals0) + FullMath.mulDiv(fees1, price1, decimals1);
@@ -350,5 +348,26 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         uint256 deviation =
             FullMath.mulDiv(uint256(getCurrentSqrtPriceX96(poolKey)) ** 2, PRECISION, trustedSqrtPrice ** 2);
         require((deviation > PRECISION - MAX_DEVIATION) && (deviation < PRECISION + MAX_DEVIATION), PriceManipulation());
+    }
+
+    function _getPricesToUsd(PoolKey memory poolKey)
+        internal
+        view
+        returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
+    {
+        (price0, price1, decimals0, decimals1) = _getPricesFromOracles(poolKey);
+
+        if (price0 == 0) {
+            if (price1 == 0) {
+                revert NoPrice();
+            } else {
+                uint256 currentSqrt = uint256(getCurrentSqrtPriceX96(poolKey));
+                price0 =
+                    FullMath.mulDiv(FullMath.mulDiv(decimals0, currentSqrt * currentSqrt, 2 ** 192), price1, decimals1);
+            }
+        } else if (price1 == 0) {
+            uint256 currentSqrt = uint256(getCurrentSqrtPriceX96(poolKey));
+            price1 = FullMath.mulDiv(FullMath.mulDiv(decimals1, 2 ** 192, currentSqrt * currentSqrt), price0, decimals0);
+        }
     }
 }

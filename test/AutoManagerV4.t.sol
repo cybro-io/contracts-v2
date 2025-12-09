@@ -31,7 +31,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
 import {Oracle} from "../src/Oracle.sol";
-import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
+import {IChainlinkOracle} from "../src/interfaces/IChainlinkOracle.sol";
 
 contract AutoManagerV4Test is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
@@ -47,7 +47,7 @@ contract AutoManagerV4Test is Test, DeployUtils {
     IAaveOracle public aaveOracle;
     LPManagerV4 public lpManager;
     address public wrappedNative;
-    IOracle public oracle;
+    Oracle public oracle;
 
     Swapper swapper;
 
@@ -73,12 +73,52 @@ contract AutoManagerV4Test is Test, DeployUtils {
 
     function setUp() public virtual {
         admin = baseAdmin;
-        vm.startPrank(admin);
-        oracle = IOracle(address(new Oracle(aaveOracle, wrappedNative, admin)));
-        vm.stopPrank();
+        _deployOracle();
         _deployAuto();
         swapper = new Swapper();
         controlPrecision = 100;
+    }
+
+    function _deployOracle() public {
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(0);
+        tokens[1] = address(usdc_BASE);
+        IChainlinkOracle[] memory oracles = new IChainlinkOracle[](2);
+        oracles[0] = IChainlinkOracle(address(oracle_ETH_BASE));
+        oracles[1] = IChainlinkOracle(address(oracle_USDC_BASE));
+        vm.startPrank(admin);
+        oracle = new Oracle(aaveOracle, wrappedNative, admin);
+        vm.assertEq(address(oracle.primaryOracle()), address(aaveOracle));
+        vm.assertEq(address(oracle.wrappedNative()), address(wrappedNative));
+        oracle.setPrimaryOracle(IAaveOracle(address(0)));
+        vm.assertEq(address(oracle.primaryOracle()), address(0));
+        vm.stopPrank();
+        vm.startPrank(user);
+        vm.expectRevert();
+        oracle.setPrimaryOracle(aaveOracle);
+        vm.expectRevert();
+        oracle.setOracles(tokens, oracles);
+        vm.stopPrank();
+        vm.startPrank(admin);
+        oracle.setOracles(tokens, oracles);
+        vm.stopPrank();
+        vm.startPrank(user);
+        vm.assertGt(oracle.getAssetPrice(address(0)), 0);
+        vm.assertGt(oracle.getAssetPrice(address(usdc_BASE)), 0);
+        vm.stopPrank();
+    }
+
+    function _updateOracle() public {
+        vm.startPrank(admin);
+        oracle.setPrimaryOracle(aaveOracle);
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(0);
+        tokens[1] = address(usdc_BASE);
+        IChainlinkOracle[] memory oracles = new IChainlinkOracle[](2);
+        oracles[0] = IChainlinkOracle(address(0));
+        oracles[1] = IChainlinkOracle(address(0));
+        oracle.setOracles(tokens, oracles);
+        vm.stopPrank();
     }
 
     function _deployAuto() public {
@@ -88,7 +128,7 @@ contract AutoManagerV4Test is Test, DeployUtils {
             poolManager,
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
-            oracle,
+            IOracle(address(oracle)),
             address(admin),
             address(admin)
         );
@@ -517,5 +557,7 @@ contract AutoManagerV4TestBaseChain is AutoManagerV4Test {
         autoClose(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
         vm.revertToState(snapshotId);
         autoRebalance(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
+        vm.revertToState(snapshotId);
+        autoClaimFees(user, amountIn0, amountIn1, key, tickLower, tickUpper, newLower, newUpper);
     }
 }
