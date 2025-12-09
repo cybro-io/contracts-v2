@@ -12,6 +12,7 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IChainlinkOracle} from "../src/interfaces/IChainlinkOracle.sol";
 
 contract DeployUtils is StdCheats {
     using SafeERC20 for IERC20Metadata;
@@ -115,6 +116,35 @@ contract DeployUtils is StdCheats {
 
     address assetProvider_wstETH_ARBITRUM = address(0x513c7E3a9c69cA3e22550eF58AC1C0088e918FFf);
     address assetProvider_wstETH_BASE = address(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
+
+    /* ========== CHAINLINK ORACLES ========== */
+
+    /* BASE */
+    IChainlinkOracle oracle_ETH_BASE = IChainlinkOracle(address(0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70));
+    IChainlinkOracle oracle_USDT_BASE = IChainlinkOracle(address(0xf19d560eB8d2ADf07BD6D13ed03e1D11215721F9));
+    IChainlinkOracle oracle_USDC_BASE = IChainlinkOracle(address(0x7e860098F58bBFC8648a4311b374B1D669a2bc6B));
+    IChainlinkOracle oracle_BTC_BASE = IChainlinkOracle(address(0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F));
+    IChainlinkOracle oracle_CBWBTC_BASE = IChainlinkOracle(address(0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D));
+    IChainlinkOracle oracle_WSTETH_ETH_BASE = IChainlinkOracle(address(0x43a5C292A453A3bF3606fa856197f09D7B74251a));
+
+    /* ARBITRUM */
+    IChainlinkOracle oracle_ETH_ARBITRUM = IChainlinkOracle(address(0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612));
+    IChainlinkOracle oracle_USDC_ARBITRUM = IChainlinkOracle(address(0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3));
+    IChainlinkOracle oracle_USDT_ARBITRUM = IChainlinkOracle(address(0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7));
+    IChainlinkOracle oracle_BTC_ARBITRUM = IChainlinkOracle(address(0x6ce185860a4963106506C203335A2910413708e9));
+    IChainlinkOracle oracle_DAI_ARBITRUM = IChainlinkOracle(address(0xc5C8E77B397E531B8EC06BFb0048328B30E9eCfB));
+    IChainlinkOracle oracle_WSTETH_ETH_ARBITRUM = IChainlinkOracle(address(0xb523AE262D20A936BC152e6023996e46FDC2A95D));
+
+    /* ETHEREUM */
+    IChainlinkOracle oracle_ETHUSD_ETHEREUM = IChainlinkOracle(address(0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419));
+    IChainlinkOracle oracle_USDTUSD_ETHEREUM = IChainlinkOracle(address(0x3E7d1eAB13ad0104d2750B8863b489D65364e32D));
+    IChainlinkOracle oracle_BTCUSD_ETHEREUM = IChainlinkOracle(address(0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c));
+    IChainlinkOracle oracle_USDCUSD_ETHEREUM = IChainlinkOracle(address(0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6));
+    IChainlinkOracle oracle_PAXGUSD_ETHEREUM = IChainlinkOracle(address(0x9944D86CEB9160aF5C5feB251FD671923323f8C3));
+
+    /* OPTIMISM */
+    IChainlinkOracle oracle_USDCUSD_OPTIMISM = IChainlinkOracle(address(0x16a9FA2FDa030272Ce99B29CF780dFA30361E0f3));
+    IChainlinkOracle oracle_USDTUSD_OPTIMISM = IChainlinkOracle(address(0xECef79E109e997bCA29c1c0897ec9d7b03647F5E));
 
     function _getAssetProvider(IERC20Metadata asset_) internal view returns (address assetProvider_) {
         if (block.chainid == CHAIN_ID_ARBITRUM) {

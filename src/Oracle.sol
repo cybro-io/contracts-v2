@@ -105,4 +105,13 @@ contract Oracle is AccessControl, IOracle {
     function setPrimaryOracle(IAaveOracle _primaryOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         primaryOracle = _primaryOracle;
     }
+
+    function setOracles(address[] calldata tokens_, IChainlinkOracle[] calldata oracles_)
+        external
+        onlyRole(MANAGER_ROLE)
+    {
+        for (uint256 i = 0; i < tokens_.length; i++) {
+            oracles[tokens_[i]] = oracles_[i];
+        }
+    }
 }
