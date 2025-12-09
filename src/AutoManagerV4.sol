@@ -256,12 +256,12 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         if (request.claimMinAmountUsd > 0) {
             PoolKey memory poolKey = _getPoolKey(request.positionId);
             (uint256 fees0, uint256 fees1) = _previewClaimFees(request.positionId);
-            (uint256 price0, uint256 price1) =
-                oracle.getPricesOfTwoAssets(poolKey.currency0, poolKey.currency1, address(0));
+            (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1) = _getPricesFromOracles(poolKey);
+
+            require(price0 != 0 && price1 != 0, NoPrice());
 
             // Calculate total fee value in USD
-            uint256 feesUsd = FullMath.mulDiv(fees0, price0, _getDecimals(poolKey.currency0))
-                + FullMath.mulDiv(fees1, price1, _getDecimals(poolKey.currency1));
+            uint256 feesUsd = FullMath.mulDiv(fees0, price0, decimals0) + FullMath.mulDiv(fees1, price1, decimals1);
 
             return feesUsd >= request.claimMinAmountUsd;
         }
@@ -317,12 +317,32 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
     }
 
     /**
+     * @notice Fetches token prices from the oracle and their decimal multipliers
+     * @param poolKey Pool key
+     * @return price0 Token0 price in the oracle base
+     * @return price1 Token1 price in the oracle base
+     * @return decimals0 10**decimals(token0)
+     * @return decimals1 10**decimals(token1)
+     */
+    function _getPricesFromOracles(PoolKey memory poolKey)
+        internal
+        view
+        returns (uint256 price0, uint256 price1, uint256 decimals0, uint256 decimals1)
+    {
+        price0 = oracle.getAssetPrice(poolKey.currency0);
+        price1 = oracle.getAssetPrice(poolKey.currency1);
+
+        decimals0 = 10 ** _getDecimals(poolKey.currency0);
+        decimals1 = 10 ** _getDecimals(poolKey.currency1);
+    }
+
+    /**
      * @notice Function to check if the price of the Dex pool is being manipulated
      * @param poolKey Pool key
      */
     function _checkPriceManipulation(PoolKey memory poolKey) internal view {
         uint256 trustedSqrtPrice;
-        try oracle.getSqrtPriceX96(poolKey.currency0, poolKey.currency1, address(0)) returns (uint160 price) {
+        try oracle.getSqrtPriceX96(poolKey.currency0, poolKey.currency1) returns (uint160 price) {
             trustedSqrtPrice = uint256(price);
         } catch {
             return;

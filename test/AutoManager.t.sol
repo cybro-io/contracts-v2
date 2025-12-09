@@ -33,7 +33,6 @@ contract AutoManagerTest is Test, DeployUtils {
     IAaveOracle public aaveOracle;
     LPManager public lpManager;
     IOracle public oracle;
-    IUniswapV3Factory public factory;
     address public wrappedNative;
 
     Swapper swapper;
@@ -61,7 +60,7 @@ contract AutoManagerTest is Test, DeployUtils {
 
     function setUp() public virtual {
         admin = baseAdmin;
-        oracle = IOracle(address(new Oracle(aaveOracle, factory, wrappedNative, admin)));
+        oracle = IOracle(address(new Oracle(aaveOracle, wrappedNative, admin)));
         _deployAuto();
         swapper = new Swapper();
     }
@@ -441,7 +440,6 @@ contract AutoManagerTestBaseChain is AutoManagerTest {
         positionManager = positionManager_UNI_BASE;
         pool = IUniswapV3Pool(0xd0b53D9277642d899DF5C87A3966A349A798F224);
         aaveOracle = aaveOracle_BASE;
-        factory = IUniswapV3Factory(positionManager_UNI_BASE.factory());
         wrappedNative = address(weth_BASE);
         super.setUp();
     }
