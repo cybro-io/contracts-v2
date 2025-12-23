@@ -18,3 +18,6 @@
 [submodule "lib/v4-periphery"]
 	path = lib/v4-periphery
 	url = https://github.com/uniswap/v4-periphery
+[submodule "lib/pancake-v3-contracts"]
+	path = lib/pancake-v3-contracts
+	url = https://github.com/pancakeswap/pancake-v3-contracts

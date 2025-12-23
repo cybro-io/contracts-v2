@@ -8,6 +8,9 @@
   "lib/openzeppelin-contracts": {
     "rev": "f9f7db03f3df020aace3958b8fb7de8891d133e5"
   },
+  "lib/pancake-v3-contracts": {
+    "rev": "5cc479f0c5a98966c74d94700057b8c3ca629afd"
+  },
   "lib/v3-core": {
     "branch": {
       "name": "0.8",
