@@ -3,7 +3,6 @@ pragma solidity 0.8.30;
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
@@ -14,7 +13,7 @@ import {FixedPoint96} from "@uniswap/v3-core/contracts/libraries/FixedPoint96.so
 import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.sol";
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 
-abstract contract BaseLPManager is IUniswapV3SwapCallback {
+abstract contract BaseLPManagerV3 {
     using SafeERC20 for IERC20Metadata;
 
     /* ============ TYPES ============ */
@@ -206,7 +205,7 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
      * @return sqrtPriceX96 Current sqrt price in Q96 format
      */
     function getCurrentSqrtPriceX96(address pool) public view returns (uint256 sqrtPriceX96) {
-        (sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        (sqrtPriceX96,) = _getPriceTick(pool);
     }
 
     /* ============ INTERNAL VIEWS ============ */
@@ -594,7 +593,7 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
      * @param ctx Position context
      */
     function _currentLowerUpper(PositionContext memory ctx) internal view returns (Prices memory prices) {
-        prices.current = uint160(getCurrentSqrtPriceX96(ctx.poolInfo.pool));
+        (prices.current,) = _getPriceTick(ctx.poolInfo.pool);
         prices.lower = TickMath.getSqrtRatioAtTick(ctx.tickLower);
         prices.upper = TickMath.getSqrtRatioAtTick(ctx.tickUpper);
     }
@@ -735,7 +734,7 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         uint256 feeGrowthInside0LastX128,
         uint256 feeGrowthInside1LastX128
     ) internal view returns (uint256 fee0, uint256 fee1) {
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+        (, int24 currentTick) = _getPriceTick(pool);
         uint256 feeGrowthGlobal0X128 = IUniswapV3Pool(pool).feeGrowthGlobal0X128();
         uint256 feeGrowthGlobal1X128 = IUniswapV3Pool(pool).feeGrowthGlobal1X128();
         (,, uint256 feeGrowthOutside0X128Lower, uint256 feeGrowthOutside1X128Lower,,,,) =
@@ -802,24 +801,6 @@ abstract contract BaseLPManager is IUniswapV3SwapCallback {
         }
     }
 
-    /* ============ CALLBACK ============ */
-
-    /**
-     * @inheritdoc IUniswapV3SwapCallback
-     * @dev Validates caller pool and settles the exact input/output leg by transferring tokens back to pool.
-     */
-    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external override {
-        require(amount0Delta > 0 || amount1Delta > 0, InvalidSwapCallbackDeltas());
-        (address tokenIn, address tokenOut, uint24 fee) = abi.decode(data, (address, address, uint24));
-        require(factory.getPool(tokenIn, tokenOut, fee) == msg.sender, InvalidSwapCallbackCaller());
-        (bool isExactInput, uint256 amountToPay) =
-            amount0Delta > 0 ? (tokenIn < tokenOut, uint256(amount0Delta)) : (tokenOut < tokenIn, uint256(amount1Delta));
-
-        if (isExactInput) {
-            IERC20Metadata(tokenIn).safeTransfer(msg.sender, amountToPay);
-        } else {
-            IERC20Metadata(tokenOut).safeTransfer(msg.sender, amountToPay);
-        }
-    }
+    function _getPriceTick(address pool) internal view virtual returns (uint160 sqrtPriceX96, int24 tick);
 }
 

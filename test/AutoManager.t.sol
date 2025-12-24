@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {AutoManager} from "../src/AutoManager.sol";
+import {AutoManagerV3Uniswap} from "../src/AutoManagerV3Uniswap.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
@@ -17,21 +17,22 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {LPManager} from "../src/LPManager.sol";
-import {BaseLPManager} from "../src/BaseLPManager.sol";
+import {LPManagerV3Uniswap} from "../src/LPManagerV3Uniswap.sol";
+import {BaseLPManagerV3} from "../src/BaseLPManagerV3.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
 import {Oracle} from "../src/Oracle.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
+import {BaseAutoManagerV3} from "../src/BaseAutoManagerV3.sol";
 
 contract AutoManagerTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
 
-    AutoManager public autoManager;
+    AutoManagerV3Uniswap public autoManager;
     INonfungiblePositionManager public positionManager;
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
-    LPManager public lpManager;
+    LPManagerV3Uniswap public lpManager;
     IOracle public oracle;
     address public wrappedNative;
 
@@ -68,14 +69,14 @@ contract AutoManagerTest is Test, DeployUtils {
     function _deployAuto() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        autoManager = new AutoManager(
+        autoManager = new AutoManagerV3Uniswap(
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
             oracle,
             address(admin),
             address(admin)
         );
-        lpManager = new LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
+        lpManager = new LPManagerV3Uniswap(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
     }
 
@@ -239,7 +240,11 @@ contract AutoManagerTest is Test, DeployUtils {
         vm.assertEq(interactionInfo.token1.balanceOf(address(protocolFeeCollector)), fee1);
     }
 
-    function _getSignatureClaimFees(AutoManager.AutoClaimRequest memory request) public view returns (bytes memory) {
+    function _getSignatureClaimFees(BaseAutoManagerV3.AutoClaimRequest memory request)
+        public
+        view
+        returns (bytes memory)
+    {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(autoManager.AUTO_CLAIM_REQUEST_TYPEHASH(), request));
         console.logBytes32(structHash);
@@ -249,7 +254,7 @@ contract AutoManagerTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureRebalance(AutoManager.AutoRebalanceRequest memory request)
+    function _getSignatureRebalance(BaseAutoManagerV3.AutoRebalanceRequest memory request)
         public
         view
         returns (bytes memory)
@@ -261,7 +266,7 @@ contract AutoManagerTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureClose(AutoManager.AutoCloseRequest memory request) public view returns (bytes memory) {
+    function _getSignatureClose(BaseAutoManagerV3.AutoCloseRequest memory request) public view returns (bytes memory) {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(autoManager.AUTO_CLOSE_REQUEST_TYPEHASH(), request));
         bytes32 digest = MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
@@ -298,7 +303,7 @@ contract AutoManagerTest is Test, DeployUtils {
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerLower = TickMath.getSqrtRatioAtTick(currentTick - 10 * pool_.tickSpacing());
         uint160 triggerUpper = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
-        AutoManager.AutoRebalanceRequest memory request = AutoManager.AutoRebalanceRequest({
+        BaseAutoManagerV3.AutoRebalanceRequest memory request = BaseAutoManagerV3.AutoRebalanceRequest({
             positionId: interactionInfo.positionId, triggerLower: triggerLower, triggerUpper: triggerUpper, nonce: 3
         });
         bool need = autoManager.needsRebalance(request);
@@ -321,7 +326,7 @@ contract AutoManagerTest is Test, DeployUtils {
         vm.prank(admin);
         autoManager.autoRebalance(request, signature);
         console.log("REBALANCED");
-        LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        LPManagerV3Uniswap.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         console.log("position.tickLower", position.tickLower);
         console.log("position.tickUpper", position.tickUpper);
         vm.assertEq(position.tickUpper - position.tickLower, tickUpper_ - tickLower_);
@@ -339,13 +344,13 @@ contract AutoManagerTest is Test, DeployUtils {
     ) public {
         _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         // claim type TIME
-        AutoManager.AutoClaimRequest memory request = AutoManager.AutoClaimRequest({
+        BaseAutoManagerV3.AutoClaimRequest memory request = BaseAutoManagerV3.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: block.timestamp,
             claimInterval: 1 days,
             claimMinAmountUsd: 0,
             recipient: interactionInfo.from,
-            transferType: BaseLPManager.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV3.TransferInfoInToken.BOTH,
             nonce: 0
         });
         bool need = autoManager.needsClaimFees(request);
@@ -367,13 +372,13 @@ contract AutoManagerTest is Test, DeployUtils {
         vm.revertToState(snapshotId);
 
         // claim type AMOUNT
-        request = AutoManager.AutoClaimRequest({
+        request = BaseAutoManagerV3.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: 0,
             claimInterval: 0,
             claimMinAmountUsd: 1e8,
             recipient: interactionInfo.from,
-            transferType: BaseLPManager.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV3.TransferInfoInToken.BOTH,
             nonce: 1
         });
         need = autoManager.needsClaimFees(request);
@@ -405,12 +410,12 @@ contract AutoManagerTest is Test, DeployUtils {
         _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerPrice = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
-        AutoManager.AutoCloseRequest memory request = AutoManager.AutoCloseRequest({
+        BaseAutoManagerV3.AutoCloseRequest memory request = BaseAutoManagerV3.AutoCloseRequest({
             positionId: interactionInfo.positionId,
             triggerPrice: triggerPrice,
             belowOrAbove: false,
             recipient: interactionInfo.from,
-            transferType: BaseLPManager.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV3.TransferInfoInToken.BOTH,
             nonce: 2
         });
         bool need = autoManager.needsClose(request);
@@ -436,7 +441,7 @@ contract AutoManagerTest is Test, DeployUtils {
     }
 }
 
-contract AutoManagerTestBaseChain is AutoManagerTest {
+contract AutoManagerV3UniswapTestBaseChain is AutoManagerTest {
     IUniswapV3Pool public pool;
 
     function setUp() public override {

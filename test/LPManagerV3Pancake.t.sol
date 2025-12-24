@@ -5,19 +5,17 @@ import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {LPManagerV3Pancake} from "../src/LPManagerV3Pancake.sol";
 import {DeployUtils} from "./DeployUtils.sol";
-import {
-    INonfungiblePositionManager
-} from "@pancakeswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
+import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ProtocolFeeCollector} from "../src/ProtocolFeeCollector.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IPancakeV3Pool} from "@pancakeswap/v3-core/contracts/interfaces/IPancakeV3Pool.sol";
+import {IPancakeV3Pool} from "../src/interfaces/IPancakeV3Pool.sol";
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
-import {BaseLPManagerV3Pancake} from "../src/BaseLPManagerV3Pancake.sol";
+import {BaseLPManagerV3} from "../src/BaseLPManagerV3.sol";
 
 abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
@@ -172,27 +170,27 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
         console.log("LIQUIDITY INCREASED");
 
         // will claim zero fees
-        claimFees(0, 0, BaseLPManagerV3Pancake.TransferInfoInToken.BOTH);
+        claimFees(0, 0, BaseLPManagerV3.TransferInfoInToken.BOTH);
         console.log("FEES CLAIMED");
         interactionInfo.tickLower = newLower_;
         interactionInfo.tickUpper = newUpper_;
         moveRange();
         console.log("RANGE MOVED", interactionInfo.positionId);
         _movePoolPrice();
-        BaseLPManagerV3Pancake.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        BaseLPManagerV3.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         console.log("unclaimedFee0", position.unclaimedFee0);
         console.log("unclaimedFee1", position.unclaimedFee1);
         compoundFees();
         console.log("COMPOUND FEES");
         _movePoolPrice();
-        claimFees(0, 0, BaseLPManagerV3Pancake.TransferInfoInToken.TOKEN0);
+        claimFees(0, 0, BaseLPManagerV3.TransferInfoInToken.TOKEN0);
         console.log("FEES CLAIMED");
 
-        withdraw(5000, 0, 0, BaseLPManagerV3Pancake.TransferInfoInToken.BOTH);
+        withdraw(5000, 0, 0, BaseLPManagerV3.TransferInfoInToken.BOTH);
         console.log("WITHDRAWN 50%");
-        withdraw(2500, 0, 0, BaseLPManagerV3Pancake.TransferInfoInToken.TOKEN0);
+        withdraw(2500, 0, 0, BaseLPManagerV3.TransferInfoInToken.TOKEN0);
         console.log("WITHDRAWN 25%");
-        withdraw(10000, 0, 0, BaseLPManagerV3Pancake.TransferInfoInToken.TOKEN1);
+        withdraw(10000, 0, 0, BaseLPManagerV3.TransferInfoInToken.TOKEN1);
         console.log("WITHDRAWN 100%");
     }
 
@@ -305,16 +303,15 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
         vm.stopPrank();
     }
 
-    function claimFees(
-        uint256 minAmountOut0_,
-        uint256 minAmountOut1_,
-        BaseLPManagerV3Pancake.TransferInfoInToken transferIn
-    ) public _assertZeroBalances {
+    function claimFees(uint256 minAmountOut0_, uint256 minAmountOut1_, BaseLPManagerV3.TransferInfoInToken transferIn)
+        public
+        _assertZeroBalances
+    {
         // Expect revert for non-owner
         vm.startPrank(user3);
-        vm.expectRevert(BaseLPManagerV3Pancake.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV3.NotPositionOwner.selector);
         lpManager.claimFees(interactionInfo.positionId, user3, minAmountOut0_, minAmountOut1_);
-        vm.expectRevert(BaseLPManagerV3Pancake.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV3.NotPositionOwner.selector);
         lpManager.claimFees(
             interactionInfo.positionId, interactionInfo.from, address(interactionInfo.token1), minAmountOut1_
         );
@@ -322,7 +319,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
 
         vm.startPrank(interactionInfo.from);
         PreviewInfo memory previewClaimFees;
-        if (transferIn == BaseLPManagerV3Pancake.TransferInfoInToken.BOTH) {
+        if (transferIn == BaseLPManagerV3.TransferInfoInToken.BOTH) {
             (previewClaimFees.amount0, previewClaimFees.amount1) =
                 lpManager.previewClaimFees(interactionInfo.positionId);
             vm.recordLogs();
@@ -349,7 +346,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
-            if (transferIn == BaseLPManagerV3Pancake.TransferInfoInToken.TOKEN0) {
+            if (transferIn == BaseLPManagerV3.TransferInfoInToken.TOKEN0) {
                 tokenOut_ = interactionInfo.token0;
                 minAmountOut_ = minAmountOut0_;
             } else {
@@ -384,7 +381,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
     function compoundFees() public _assertZeroBalances {
         // Expect revert for non-owner
         vm.startPrank(user3);
-        vm.expectRevert(BaseLPManagerV3Pancake.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV3.NotPositionOwner.selector);
         lpManager.compoundFees(interactionInfo.positionId, 0);
         vm.stopPrank();
 
@@ -423,7 +420,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
     function moveRange() public _assertZeroBalances {
         // Expect revert for non-owner
         vm.startPrank(user3);
-        vm.expectRevert(BaseLPManagerV3Pancake.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV3.NotPositionOwner.selector);
         lpManager.moveRange(
             interactionInfo.positionId, interactionInfo.from, interactionInfo.tickLower, interactionInfo.tickUpper, 0
         );
@@ -436,7 +433,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
         );
         console.log("balance token0 user before move range", interactionInfo.token0.balanceOf(interactionInfo.from));
         console.log("balance token1 user before move range", interactionInfo.token1.balanceOf(interactionInfo.from));
-        BaseLPManagerV3Pancake.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        BaseLPManagerV3.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         uint256 oldPositionId_ = interactionInfo.positionId;
         vm.recordLogs();
         (uint256 newPositionId_, uint128 liquidity_, uint256 amount0_, uint256 amount1_) = lpManager.moveRange(
@@ -461,7 +458,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
         }
         vm.assertEq(positionManager.ownerOf(newPositionId_), interactionInfo.from);
         interactionInfo.positionId = newPositionId_;
-        BaseLPManagerV3Pancake.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
+        BaseLPManagerV3.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
         console.log("positionAfter.liquidity", positionAfter.liquidity);
         console.log("position.liquidity", position.liquidity);
         console.log("previewMoveRange.liquidity", previewMoveRange.liquidity);
@@ -476,20 +473,20 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
         uint32 percent_,
         uint256 minAmountOut0_,
         uint256 minAmountOut1_,
-        BaseLPManagerV3Pancake.TransferInfoInToken transferIn
+        BaseLPManagerV3.TransferInfoInToken transferIn
     ) public _assertZeroBalances {
         // Expect revert for non-owner
         vm.startPrank(user3);
-        vm.expectRevert(BaseLPManagerV3Pancake.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV3.NotPositionOwner.selector);
         lpManager.withdraw(interactionInfo.positionId, percent_, interactionInfo.from, minAmountOut0_, minAmountOut1_);
-        vm.expectRevert(BaseLPManagerV3Pancake.NotPositionOwner.selector);
+        vm.expectRevert(BaseLPManagerV3.NotPositionOwner.selector);
         lpManager.withdraw(interactionInfo.positionId, percent_, user3, address(interactionInfo.token0), minAmountOut0_);
         vm.stopPrank();
 
         vm.startPrank(interactionInfo.from);
         PreviewInfo memory previewWithdraw;
-        BaseLPManagerV3Pancake.Position memory position = lpManager.getPosition(interactionInfo.positionId);
-        if (transferIn == BaseLPManagerV3Pancake.TransferInfoInToken.BOTH) {
+        BaseLPManagerV3.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        if (transferIn == BaseLPManagerV3.TransferInfoInToken.BOTH) {
             (previewWithdraw.amount0, previewWithdraw.amount1) =
                 lpManager.previewWithdraw(interactionInfo.positionId, percent_);
             (uint256 amount0_, uint256 amount1_) = lpManager.withdraw(
@@ -500,7 +497,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
         } else {
             IERC20Metadata tokenOut_;
             uint256 minAmountOut_;
-            if (transferIn == BaseLPManagerV3Pancake.TransferInfoInToken.TOKEN0) {
+            if (transferIn == BaseLPManagerV3.TransferInfoInToken.TOKEN0) {
                 tokenOut_ = interactionInfo.token0;
                 minAmountOut_ = minAmountOut0_;
             } else {
@@ -515,7 +512,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
             vm.assertApproxEqAbs(previewWithdraw.amount1, amountOut_, amountOut_ / controlPrecision);
         }
         vm.stopPrank();
-        BaseLPManagerV3Pancake.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
+        BaseLPManagerV3.Position memory positionAfter = lpManager.getPosition(interactionInfo.positionId);
         console.log("positionAfter.liquidity", positionAfter.liquidity);
         console.log("position.liquidity", position.liquidity);
         console.log("percent_", percent_, "\n\n");

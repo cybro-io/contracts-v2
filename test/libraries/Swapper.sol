@@ -20,9 +20,8 @@ import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {IPancakeV3SwapCallback} from "@pancakeswap/v3-core/contracts/interfaces/callback/IPancakeV3SwapCallback.sol";
-import {IPancakeV3Pool} from "@pancakeswap/v3-core/contracts/interfaces/IPancakeV3Pool.sol";
-import {IPancakeV3Factory} from "@pancakeswap/v3-core/contracts/interfaces/IPancakeV3Factory.sol";
+import {IPancakeV3SwapCallback} from "../../src/interfaces/IPancakeV3SwapCallback.sol";
+import {IPancakeV3Pool} from "../../src/interfaces/IPancakeV3Pool.sol";
 
 enum VaultType {
     UniV3
@@ -47,7 +46,7 @@ contract Swapper is IUniswapV3SwapCallback, IUnlockCallback, IPancakeV3SwapCallb
     ) public {
         if (isPancakeV3) {
             IPancakeV3Pool pool = IPancakeV3Pool(
-                IPancakeV3Factory(INonfungiblePositionManager(positionManager).factory()).getPool(token0, token1, fee)
+                IUniswapV3Factory(INonfungiblePositionManager(positionManager).factory()).getPool(token0, token1, fee)
             );
             _movePoolPricePancakeV3(pool, token0, token1, targetSqrtPriceX96);
         } else {

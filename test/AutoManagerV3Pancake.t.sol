@@ -5,14 +5,12 @@ import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {AutoManagerV3Pancake} from "../src/AutoManagerV3Pancake.sol";
 import {DeployUtils} from "./DeployUtils.sol";
-import {
-    INonfungiblePositionManager
-} from "@pancakeswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
+import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ProtocolFeeCollector} from "../src/ProtocolFeeCollector.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IPancakeV3Pool} from "@pancakeswap/v3-core/contracts/interfaces/IPancakeV3Pool.sol";
+import {IPancakeV3Pool} from "../src/interfaces/IPancakeV3Pool.sol";
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -20,13 +18,13 @@ import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {LPManagerV3Pancake} from "../src/LPManagerV3Pancake.sol";
-import {BaseLPManagerV3Pancake} from "../src/BaseLPManagerV3Pancake.sol";
+import {BaseLPManagerV3} from "../src/BaseLPManagerV3.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
 import {Oracle} from "../src/Oracle.sol";
-import {IPancakeV3Factory} from "@pancakeswap/v3-core/contracts/interfaces/IPancakeV3Factory.sol";
+import {BaseAutoManagerV3} from "../src/BaseAutoManagerV3.sol";
 
-contract AutoManagerV3PancakeTest is Test, DeployUtils {
+contract BaseAutoManagerV3Test is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
 
     AutoManagerV3Pancake public autoManager;
@@ -241,7 +239,7 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
         vm.assertEq(interactionInfo.token1.balanceOf(address(protocolFeeCollector)), fee1);
     }
 
-    function _getSignatureClaimFees(AutoManagerV3Pancake.AutoClaimRequest memory request)
+    function _getSignatureClaimFees(BaseAutoManagerV3.AutoClaimRequest memory request)
         public
         view
         returns (bytes memory)
@@ -255,7 +253,7 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureRebalance(AutoManagerV3Pancake.AutoRebalanceRequest memory request)
+    function _getSignatureRebalance(BaseAutoManagerV3.AutoRebalanceRequest memory request)
         public
         view
         returns (bytes memory)
@@ -267,11 +265,7 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
         return abi.encodePacked(r, s, v);
     }
 
-    function _getSignatureClose(AutoManagerV3Pancake.AutoCloseRequest memory request)
-        public
-        view
-        returns (bytes memory)
-    {
+    function _getSignatureClose(BaseAutoManagerV3.AutoCloseRequest memory request) public view returns (bytes memory) {
         bytes32 domainSeparator = _getDomainSeparator();
         bytes32 structHash = keccak256(abi.encode(autoManager.AUTO_CLOSE_REQUEST_TYPEHASH(), request));
         bytes32 digest = MessageHashUtils.toTypedDataHash(domainSeparator, structHash);
@@ -308,7 +302,7 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerLower = TickMath.getSqrtRatioAtTick(currentTick - 10 * pool_.tickSpacing());
         uint160 triggerUpper = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
-        AutoManagerV3Pancake.AutoRebalanceRequest memory request = AutoManagerV3Pancake.AutoRebalanceRequest({
+        BaseAutoManagerV3.AutoRebalanceRequest memory request = BaseAutoManagerV3.AutoRebalanceRequest({
             positionId: interactionInfo.positionId, triggerLower: triggerLower, triggerUpper: triggerUpper, nonce: 3
         });
         bool need = autoManager.needsRebalance(request);
@@ -349,13 +343,13 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
     ) public {
         _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         // claim type TIME
-        AutoManagerV3Pancake.AutoClaimRequest memory request = AutoManagerV3Pancake.AutoClaimRequest({
+        BaseAutoManagerV3.AutoClaimRequest memory request = BaseAutoManagerV3.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: block.timestamp,
             claimInterval: 1 days,
             claimMinAmountUsd: 0,
             recipient: interactionInfo.from,
-            transferType: BaseLPManagerV3Pancake.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV3.TransferInfoInToken.BOTH,
             nonce: 0
         });
         bool need = autoManager.needsClaimFees(request);
@@ -377,13 +371,13 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
         vm.revertToState(snapshotId);
 
         // claim type AMOUNT
-        request = AutoManagerV3Pancake.AutoClaimRequest({
+        request = BaseAutoManagerV3.AutoClaimRequest({
             positionId: interactionInfo.positionId,
             initialTimestamp: 0,
             claimInterval: 0,
             claimMinAmountUsd: 1e8,
             recipient: interactionInfo.from,
-            transferType: BaseLPManagerV3Pancake.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV3.TransferInfoInToken.BOTH,
             nonce: 1
         });
         need = autoManager.needsClaimFees(request);
@@ -415,12 +409,12 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
         _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerPrice = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
-        AutoManagerV3Pancake.AutoCloseRequest memory request = AutoManagerV3Pancake.AutoCloseRequest({
+        BaseAutoManagerV3.AutoCloseRequest memory request = BaseAutoManagerV3.AutoCloseRequest({
             positionId: interactionInfo.positionId,
             triggerPrice: triggerPrice,
             belowOrAbove: false,
             recipient: interactionInfo.from,
-            transferType: BaseLPManagerV3Pancake.TransferInfoInToken.BOTH,
+            transferType: BaseLPManagerV3.TransferInfoInToken.BOTH,
             nonce: 2
         });
         bool need = autoManager.needsClose(request);
@@ -446,7 +440,7 @@ contract AutoManagerV3PancakeTest is Test, DeployUtils {
     }
 }
 
-contract AutoManagerV3PancakeTestBaseChain is AutoManagerV3PancakeTest {
+contract AutoManagerV3PancakeTestBaseChain is BaseAutoManagerV3Test {
     IPancakeV3Pool public pool;
 
     function setUp() public override {

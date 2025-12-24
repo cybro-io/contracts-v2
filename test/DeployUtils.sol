@@ -13,10 +13,7 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IChainlinkOracle} from "../src/interfaces/IChainlinkOracle.sol";
-import {IPancakeV3Pool} from "@pancakeswap/v3-core/contracts/interfaces/IPancakeV3Pool.sol";
-import {
-    INonfungiblePositionManager as IPancakeV3PositionManager
-} from "@pancakeswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
+import {IPancakeV3Pool} from "../src/interfaces/IPancakeV3Pool.sol";
 
 contract DeployUtils is StdCheats {
     using SafeERC20 for IERC20Metadata;
@@ -119,8 +116,8 @@ contract DeployUtils is StdCheats {
     /* =========== PANCAKE V3 ============ */
 
     // IUniswapV3Factory pancakeV3Factory = IUniswapV3Factory(address(0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865));
-    IPancakeV3PositionManager pancakeV3PositionManager =
-        IPancakeV3PositionManager(address(0x46A15B0b27311cedF172AB29E4f4766fbE7F4364));
+    INonfungiblePositionManager pancakeV3PositionManager =
+        INonfungiblePositionManager(address(0x46A15B0b27311cedF172AB29E4f4766fbE7F4364));
 
     /* BASE */
     IPancakeV3Pool pancakeV3_USDC_WETH = IPancakeV3Pool(address(0x72AB388E2E2F6FaceF59E3C3FA2C4E29011c2D38));
