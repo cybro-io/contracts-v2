@@ -8,10 +8,10 @@ import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/inter
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
-import {BaseLPManager} from "./BaseLPManager.sol";
+import {BaseLPManagerV3} from "./BaseLPManagerV3.sol";
 
 /**
- * @title LPManager
+ * @title BaseManagerV3
  * @notice High-level helper contract for managing Uniswap V3 liquidity positions.
  * @dev Wraps common flows: create a position, claim fees (optionally in a single token),
  *      compound fees back into the position, increase liquidity with auto-rebalancing of inputs,
@@ -28,18 +28,18 @@ import {BaseLPManager} from "./BaseLPManager.sol";
  *      - Some flows perform swaps to rebalance inputs. Swaps use conservative price limits when
  *        rebalancing to avoid crossing the range unexpectedly.
  */
-contract LPManager is BaseLPManager {
+abstract contract BaseManagerV3 is BaseLPManagerV3 {
     using SafeERC20 for IERC20Metadata;
 
     /* ============ CONSTRUCTOR ============ */
 
     /**
-     * @notice Initializes LPManager with Uniswap position manager and protocol fee collector
+     * @notice Initializes BaseManagerV3 with Uniswap position manager and protocol fee collector
      * @param _positionManager Uniswap V3 NonfungiblePositionManager
      * @param _protocolFeeCollector Protocol fee collector
      */
     constructor(INonfungiblePositionManager _positionManager, IProtocolFeeCollector _protocolFeeCollector)
-        BaseLPManager(_positionManager, _protocolFeeCollector)
+        BaseLPManagerV3(_positionManager, _protocolFeeCollector)
     {}
 
     /* ============ VIEW FUNCTIONS ============ */

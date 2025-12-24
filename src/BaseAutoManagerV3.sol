@@ -10,18 +10,18 @@ import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {BaseLPManager} from "./BaseLPManager.sol";
+import {BaseLPManagerV3} from "./BaseLPManagerV3.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IOracle} from "./interfaces/IOracle.sol";
 
 /**
- * @title AutoManager
+ * @title BaseAutoManagerV3
  * @notice Automation layer on top of BaseLPManager providing signed requests for auto-claim, auto-close and auto-rebalance.
  * @dev Verifies EIP712 signed intents by the position owner, evaluates on-chain conditions (price, fees, time) and
  *      executes flows inherited from BaseLPManager.
  */
-contract AutoManager is BaseLPManager, EIP712, AccessControl {
+abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
     using SafeERC20 for IERC20Metadata;
     using ECDSA for bytes32;
 
@@ -136,7 +136,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         IOracle _oracle,
         address admin,
         address autoManager
-    ) EIP712("AutoManager", "1") BaseLPManager(_positionManager, _protocolFeeCollector) {
+    ) EIP712("AutoManager", "1") BaseLPManagerV3(_positionManager, _protocolFeeCollector) {
         oracle = _oracle;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(AUTO_MANAGER_ROLE, autoManager);
@@ -207,7 +207,7 @@ contract AutoManager is BaseLPManager, EIP712, AccessControl {
         );
         PositionContext memory ctx = _getPositionContext(request.positionId);
         _checkPriceManipulation(ctx.poolInfo);
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(ctx.poolInfo.pool).slot0();
+        (, int24 currentTick) = _getPriceTick(ctx.poolInfo.pool);
         int24 newLower;
         int24 newUpper;
         {
