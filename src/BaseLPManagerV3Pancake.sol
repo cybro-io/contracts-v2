@@ -4,14 +4,13 @@ pragma solidity 0.8.30;
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {BaseLPManagerV3} from "./BaseLPManagerV3.sol";
-import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
-import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {IPancakeV3Pool} from "./interfaces/IPancakeV3Pool.sol";
 import {IPancakeV3SwapCallback} from "./interfaces/IPancakeV3SwapCallback.sol";
 
-abstract contract ExtendLPManagerV3Pancake is BaseLPManagerV3, IPancakeV3SwapCallback {
+abstract contract BaseLPManagerV3Pancake is BaseLPManagerV3, IPancakeV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
 
+    /// @inheritdoc BaseLPManagerV3
     function _getPriceTick(address pool) internal view override returns (uint160 sqrtPriceX96, int24 tick) {
         (sqrtPriceX96, tick,,,,,) = IPancakeV3Pool(pool).slot0();
     }

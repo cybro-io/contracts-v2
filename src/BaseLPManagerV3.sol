@@ -11,7 +11,6 @@ import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v3-core/contracts/libraries/FixedPoint96.sol";
 import {FixedPoint128} from "@uniswap/v3-core/contracts/libraries/FixedPoint128.sol";
-import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 
 abstract contract BaseLPManagerV3 {
     using SafeERC20 for IERC20Metadata;
@@ -801,6 +800,12 @@ abstract contract BaseLPManagerV3 {
         }
     }
 
+    /**
+     * @notice Gets the current price and current tick of a pool
+     * @param pool Pool address
+     * @return sqrtPriceX96 Sqrt price X96
+     * @return tick Tick
+     */
     function _getPriceTick(address pool) internal view virtual returns (uint160 sqrtPriceX96, int24 tick);
 }
 

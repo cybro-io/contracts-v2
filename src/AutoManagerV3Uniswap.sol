@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {BaseAutoManagerV3} from "./BaseAutoManagerV3.sol";
-import {ExtendLPManagerV3Uniswap} from "./ExtendLPManagerV3Uniswap.sol";
+import {BaseLPManagerV3Uniswap} from "./BaseLPManagerV3Uniswap.sol";
 import {IOracle} from "./interfaces/IOracle.sol";
 
 /**
@@ -13,7 +13,7 @@ import {IOracle} from "./interfaces/IOracle.sol";
  * @dev Verifies EIP712 signed intents by the position owner, evaluates on-chain conditions (price, fees, time) and
  *      executes flows inherited from BaseLPManager.
  */
-contract AutoManagerV3Uniswap is BaseAutoManagerV3, ExtendLPManagerV3Uniswap {
+contract AutoManagerV3Uniswap is BaseAutoManagerV3, BaseLPManagerV3Uniswap {
     /* ============ CONSTRUCTOR ============ */
 
     /**

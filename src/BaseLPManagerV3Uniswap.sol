@@ -7,9 +7,10 @@ import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/call
 import {BaseLPManagerV3} from "./BaseLPManagerV3.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
-abstract contract ExtendLPManagerV3Uniswap is BaseLPManagerV3, IUniswapV3SwapCallback {
+abstract contract BaseLPManagerV3Uniswap is BaseLPManagerV3, IUniswapV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
 
+    /// @inheritdoc BaseLPManagerV3
     function _getPriceTick(address pool) internal view override returns (uint160 sqrtPriceX96, int24 tick) {
         (sqrtPriceX96, tick,,,,,) = IUniswapV3Pool(pool).slot0();
     }
