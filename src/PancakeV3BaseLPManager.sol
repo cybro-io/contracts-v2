@@ -7,7 +7,7 @@ import {BaseLPManagerV3} from "./BaseLPManagerV3.sol";
 import {IPancakeV3Pool} from "./interfaces/IPancakeV3Pool.sol";
 import {IPancakeV3SwapCallback} from "./interfaces/IPancakeV3SwapCallback.sol";
 
-abstract contract BaseLPManagerV3Pancake is BaseLPManagerV3, IPancakeV3SwapCallback {
+abstract contract PancakeV3BaseLPManager is BaseLPManagerV3, IPancakeV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
 
     /// @inheritdoc BaseLPManagerV3

@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {AutoManagerV3Uniswap} from "../src/AutoManagerV3Uniswap.sol";
+import {UniswapV3AutoManager} from "../src/UniswapV3AutoManager.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
@@ -17,7 +17,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {LPManagerV3Uniswap} from "../src/LPManagerV3Uniswap.sol";
+import {UniswapV3LPManager} from "../src/UniswapV3LPManager.sol";
 import {BaseLPManagerV3} from "../src/BaseLPManagerV3.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
@@ -28,11 +28,11 @@ import {BaseAutoManagerV3} from "../src/BaseAutoManagerV3.sol";
 contract AutoManagerTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
 
-    AutoManagerV3Uniswap public autoManager;
+    UniswapV3AutoManager public autoManager;
     INonfungiblePositionManager public positionManager;
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
-    LPManagerV3Uniswap public lpManager;
+    UniswapV3LPManager public lpManager;
     IOracle public oracle;
     address public wrappedNative;
 
@@ -69,14 +69,14 @@ contract AutoManagerTest is Test, DeployUtils {
     function _deployAuto() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        autoManager = new AutoManagerV3Uniswap(
+        autoManager = new UniswapV3AutoManager(
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
             oracle,
             address(admin),
             address(admin)
         );
-        lpManager = new LPManagerV3Uniswap(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
+        lpManager = new UniswapV3LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
     }
 
@@ -326,7 +326,7 @@ contract AutoManagerTest is Test, DeployUtils {
         vm.prank(admin);
         autoManager.autoRebalance(request, signature);
         console.log("REBALANCED");
-        LPManagerV3Uniswap.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        UniswapV3LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         console.log("position.tickLower", position.tickLower);
         console.log("position.tickUpper", position.tickUpper);
         vm.assertEq(position.tickUpper - position.tickLower, tickUpper_ - tickLower_);

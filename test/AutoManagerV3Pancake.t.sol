@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {AutoManagerV3Pancake} from "../src/AutoManagerV3Pancake.sol";
+import {PancakeV3AutoManager} from "../src/PancakeV3AutoManager.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
@@ -17,7 +17,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {IAaveOracle} from "../src/interfaces/IAaveOracle.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {LPManagerV3Pancake} from "../src/LPManagerV3Pancake.sol";
+import {PancakeV3LPManager} from "../src/PancakeV3LPManager.sol";
 import {BaseLPManagerV3} from "../src/BaseLPManagerV3.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
@@ -27,11 +27,11 @@ import {BaseAutoManagerV3} from "../src/BaseAutoManagerV3.sol";
 contract BaseAutoManagerV3Test is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
 
-    AutoManagerV3Pancake public autoManager;
+    PancakeV3AutoManager public autoManager;
     INonfungiblePositionManager public positionManager;
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
-    LPManagerV3Pancake public lpManager;
+    PancakeV3LPManager public lpManager;
     IOracle public oracle;
     address public wrappedNative;
 
@@ -68,14 +68,14 @@ contract BaseAutoManagerV3Test is Test, DeployUtils {
     function _deployAuto() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        autoManager = new AutoManagerV3Pancake(
+        autoManager = new PancakeV3AutoManager(
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
             oracle,
             address(admin),
             address(admin)
         );
-        lpManager = new LPManagerV3Pancake(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
+        lpManager = new PancakeV3LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
     }
 
@@ -325,7 +325,7 @@ contract BaseAutoManagerV3Test is Test, DeployUtils {
         vm.prank(admin);
         autoManager.autoRebalance(request, signature);
         console.log("REBALANCED");
-        LPManagerV3Pancake.Position memory position = lpManager.getPosition(interactionInfo.positionId);
+        PancakeV3LPManager.Position memory position = lpManager.getPosition(interactionInfo.positionId);
         console.log("position.tickLower", position.tickLower);
         console.log("position.tickUpper", position.tickUpper);
         vm.assertEq(position.tickUpper - position.tickLower, tickUpper_ - tickLower_);

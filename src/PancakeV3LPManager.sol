@@ -4,10 +4,10 @@ pragma solidity 0.8.30;
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
 import {BaseManagerV3} from "./BaseManagerV3.sol";
-import {BaseLPManagerV3Pancake} from "./BaseLPManagerV3Pancake.sol";
+import {PancakeV3BaseLPManager} from "./PancakeV3BaseLPManager.sol";
 
 /**
- * @title LPManagerV3Pancake
+ * @title PancakeV3LPManager
  * @notice High-level helper contract for managing Pancake V3 liquidity positions.
  * @dev Wraps common flows: create a position, claim fees (optionally in a single token),
  *      compound fees back into the position, increase liquidity with auto-rebalancing of inputs,
@@ -24,11 +24,11 @@ import {BaseLPManagerV3Pancake} from "./BaseLPManagerV3Pancake.sol";
  *      - Some flows perform swaps to rebalance inputs. Swaps use conservative price limits when
  *        rebalancing to avoid crossing the range unexpectedly.
  */
-contract LPManagerV3Pancake is BaseManagerV3, BaseLPManagerV3Pancake {
+contract PancakeV3LPManager is BaseManagerV3, PancakeV3BaseLPManager {
     /* ============ CONSTRUCTOR ============ */
 
     /**
-     * @notice Initializes LPManagerV3Pancake with Pancake V3 position manager and protocol fee collector
+     * @notice Initializes PancakeV3LPManager with Pancake V3 position manager and protocol fee collector
      * @param _positionManager Pancake V3 NonfungiblePositionManager
      * @param _protocolFeeCollector Protocol fee collector
      */

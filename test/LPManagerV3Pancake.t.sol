@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {LPManagerV3Pancake} from "../src/LPManagerV3Pancake.sol";
+import {PancakeV3LPManager} from "../src/PancakeV3LPManager.sol";
 import {DeployUtils} from "./DeployUtils.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {Swapper} from "./libraries/Swapper.sol";
@@ -20,7 +20,7 @@ import {BaseLPManagerV3} from "../src/BaseLPManagerV3.sol";
 abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
 
-    LPManagerV3Pancake public lpManager;
+    PancakeV3LPManager public lpManager;
     INonfungiblePositionManager public positionManager;
     ProtocolFeeCollector public protocolFeeCollector;
 
@@ -62,7 +62,7 @@ abstract contract LPManagerV3PancakeTest is Test, DeployUtils {
     function _deployLPManager() public {
         vm.startPrank(admin);
         protocolFeeCollector = new ProtocolFeeCollector(10, 10, 10, address(admin));
-        lpManager = new LPManagerV3Pancake(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
+        lpManager = new PancakeV3LPManager(positionManager, IProtocolFeeCollector(address(protocolFeeCollector)));
         vm.stopPrank();
     }
 

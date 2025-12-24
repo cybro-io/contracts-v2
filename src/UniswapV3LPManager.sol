@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "./interfaces/IProtocolFeeCollector.sol";
-import {BaseLPManagerV3Uniswap} from "./BaseLPManagerV3Uniswap.sol";
+import {UniswapV3BaseLPManager} from "./UniswapV3BaseLPManager.sol";
 import {BaseManagerV3} from "./BaseManagerV3.sol";
 
 /**
@@ -24,7 +24,7 @@ import {BaseManagerV3} from "./BaseManagerV3.sol";
  *      - Some flows perform swaps to rebalance inputs. Swaps use conservative price limits when
  *        rebalancing to avoid crossing the range unexpectedly.
  */
-contract LPManagerV3Uniswap is BaseManagerV3, BaseLPManagerV3Uniswap {
+contract UniswapV3LPManager is BaseManagerV3, UniswapV3BaseLPManager {
     /* ============ CONSTRUCTOR ============ */
 
     /**

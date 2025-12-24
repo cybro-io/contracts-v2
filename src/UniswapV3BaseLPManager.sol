@@ -7,7 +7,7 @@ import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/call
 import {BaseLPManagerV3} from "./BaseLPManagerV3.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
-abstract contract BaseLPManagerV3Uniswap is BaseLPManagerV3, IUniswapV3SwapCallback {
+abstract contract UniswapV3BaseLPManager is BaseLPManagerV3, IUniswapV3SwapCallback {
     using SafeERC20 for IERC20Metadata;
 
     /// @inheritdoc BaseLPManagerV3
