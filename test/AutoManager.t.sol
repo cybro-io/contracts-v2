@@ -20,6 +20,9 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {LPManager} from "../src/LPManager.sol";
 import {BaseLPManager} from "../src/BaseLPManager.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IOracle} from "../src/interfaces/IOracle.sol";
+import {Oracle} from "../src/Oracle.sol";
+import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 
 contract AutoManagerTest is Test, DeployUtils {
     using SafeERC20 for IERC20Metadata;
@@ -29,6 +32,8 @@ contract AutoManagerTest is Test, DeployUtils {
     ProtocolFeeCollector public protocolFeeCollector;
     IAaveOracle public aaveOracle;
     LPManager public lpManager;
+    IOracle public oracle;
+    address public wrappedNative;
 
     Swapper swapper;
 
@@ -55,6 +60,7 @@ contract AutoManagerTest is Test, DeployUtils {
 
     function setUp() public virtual {
         admin = baseAdmin;
+        oracle = IOracle(address(new Oracle(aaveOracle, wrappedNative, admin)));
         _deployAuto();
         swapper = new Swapper();
     }
@@ -65,7 +71,7 @@ contract AutoManagerTest is Test, DeployUtils {
         autoManager = new AutoManager(
             positionManager,
             IProtocolFeeCollector(address(protocolFeeCollector)),
-            aaveOracle,
+            oracle,
             address(admin),
             address(admin)
         );
@@ -76,13 +82,7 @@ contract AutoManagerTest is Test, DeployUtils {
     function _provideAndApproveSpecific(bool needToProvide, IERC20Metadata asset_, uint256 amount_, address user_)
         internal
     {
-        if (needToProvide) {
-            dealTokens(asset_, user_, amount_);
-        }
-        vm.startPrank(user_);
-        asset_.forceApprove(address(lpManager), amount_);
-        asset_.forceApprove(address(autoManager), amount_);
-        vm.stopPrank();
+        _provideAndApproveSpecific(needToProvide, asset_, amount_, user_, address(lpManager), address(autoManager));
     }
 
     // TESTS
@@ -132,7 +132,7 @@ contract AutoManagerTest is Test, DeployUtils {
         return FullMath.mulDiv(amount1, 2 ** 192, uint256(currentPrice) * uint256(currentPrice));
     }
 
-    function _intializePosition(
+    function _initializePosition(
         address user_,
         uint256 amountIn0_,
         uint256 amountIn1_,
@@ -277,10 +277,9 @@ contract AutoManagerTest is Test, DeployUtils {
     }
 
     function _testGetters() public {
-        vm.assertEq(address(autoManager.aaveOracle()), address(aaveOracle));
-        vm.assertEq(autoManager.baseCurrencyUnit(), aaveOracle.BASE_CURRENCY_UNIT());
+        vm.assertEq(address(autoManager.oracle()), address(oracle));
         vm.expectRevert();
-        autoManager.setAaveOracle(IAaveOracle(address(100010)));
+        autoManager.setOracle(IOracle(address(100010)));
     }
 
     function autoRebalance(
@@ -293,7 +292,7 @@ contract AutoManagerTest is Test, DeployUtils {
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
+        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerLower = TickMath.getSqrtRatioAtTick(currentTick - 10 * pool_.tickSpacing());
         uint160 triggerUpper = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
@@ -335,7 +334,7 @@ contract AutoManagerTest is Test, DeployUtils {
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
+        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         // claim type TIME
         AutoManager.AutoClaimRequest memory request = AutoManager.AutoClaimRequest({
             positionId: interactionInfo.positionId,
@@ -400,7 +399,7 @@ contract AutoManagerTest is Test, DeployUtils {
         int24 newLower_,
         int24 newUpper_
     ) public {
-        _intializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
+        _initializePosition(user_, amountIn0_, amountIn1_, pool_, tickLower_, tickUpper_, newLower_, newUpper_);
         (, int24 currentTick,,,,,) = pool_.slot0();
         uint160 triggerPrice = TickMath.getSqrtRatioAtTick(currentTick + 10 * pool_.tickSpacing());
         AutoManager.AutoCloseRequest memory request = AutoManager.AutoCloseRequest({
@@ -441,6 +440,7 @@ contract AutoManagerTestBaseChain is AutoManagerTest {
         positionManager = positionManager_UNI_BASE;
         pool = IUniswapV3Pool(0xd0b53D9277642d899DF5C87A3966A349A798F224);
         aaveOracle = aaveOracle_BASE;
+        wrappedNative = address(weth_BASE);
         super.setUp();
     }
 
