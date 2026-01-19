@@ -2,7 +2,6 @@
 
 pragma solidity ^0.8.30;
 
-import {StdCheats} from "forge-std/StdCheats.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
@@ -20,12 +19,14 @@ import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {IPancakeV3SwapCallback} from "../../src/interfaces/IPancakeV3SwapCallback.sol";
+import {IPancakeV3Pool} from "../../src/interfaces/IPancakeV3Pool.sol";
 
 enum VaultType {
     UniV3
 }
 
-contract Swapper is IUniswapV3SwapCallback, IUnlockCallback, DeployUtils {
+contract Swapper is IUniswapV3SwapCallback, IUnlockCallback, IPancakeV3SwapCallback, DeployUtils {
     using SafeERC20 for IERC20Metadata;
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
@@ -35,19 +36,23 @@ contract Swapper is IUniswapV3SwapCallback, IUnlockCallback, DeployUtils {
     uint8 internal constant ACTION_SWAP = 1;
 
     function movePoolPrice(
-        INonfungiblePositionManager positionManager,
+        address positionManager,
         address token0,
         address token1,
         uint24 fee,
-        uint160 targetSqrtPriceX96
+        uint160 targetSqrtPriceX96,
+        bool isPancakeV3
     ) public {
-        IUniswapV3Pool pool = IUniswapV3Pool(IUniswapV3Factory(positionManager.factory()).getPool(token0, token1, fee));
-
-        (uint160 sqrtPriceX96,,,,,,) = pool.slot0();
-        if (sqrtPriceX96 > targetSqrtPriceX96) {
-            pool.swap(msg.sender, true, type(int256).max, targetSqrtPriceX96, abi.encode(token0, token1));
+        if (isPancakeV3) {
+            IPancakeV3Pool pool = IPancakeV3Pool(
+                IUniswapV3Factory(INonfungiblePositionManager(positionManager).factory()).getPool(token0, token1, fee)
+            );
+            _movePoolPricePancakeV3(pool, token0, token1, targetSqrtPriceX96);
         } else {
-            pool.swap(msg.sender, false, type(int256).max, targetSqrtPriceX96, abi.encode(token1, token0));
+            IUniswapV3Pool pool = IUniswapV3Pool(
+                IUniswapV3Factory(INonfungiblePositionManager(positionManager).factory()).getPool(token0, token1, fee)
+            );
+            _movePoolPriceUniV3(pool, token0, token1, targetSqrtPriceX96);
         }
     }
 
@@ -63,8 +68,25 @@ contract Swapper is IUniswapV3SwapCallback, IUnlockCallback, DeployUtils {
         }
     }
 
-    function movePoolPrice(address pool, address token0, address token1, uint160 targetSqrtPriceX96) public {
-        _movePoolPriceUniV3(IUniswapV3Pool(pool), token0, token1, targetSqrtPriceX96);
+    function _movePoolPricePancakeV3(IPancakeV3Pool pool, address token0, address token1, uint160 targetSqrtPriceX96)
+        internal
+    {
+        (uint160 sqrtPriceX96,,,,,,) = pool.slot0();
+        if (sqrtPriceX96 > targetSqrtPriceX96) {
+            pool.swap(msg.sender, true, type(int256).max, targetSqrtPriceX96, abi.encode(token0, token1));
+        } else {
+            pool.swap(msg.sender, false, type(int256).max, targetSqrtPriceX96, abi.encode(token1, token0));
+        }
+    }
+
+    function movePoolPrice(address pool, address token0, address token1, uint160 targetSqrtPriceX96, bool isPancakeV3)
+        public
+    {
+        if (isPancakeV3) {
+            _movePoolPricePancakeV3(IPancakeV3Pool(pool), token0, token1, targetSqrtPriceX96);
+        } else {
+            _movePoolPriceUniV3(IUniswapV3Pool(pool), token0, token1, targetSqrtPriceX96);
+        }
     }
 
     function movePoolPriceV4(IPoolManager manager, PoolKey memory key, uint160 targetSqrtPriceX96) public {
@@ -92,6 +114,10 @@ contract Swapper is IUniswapV3SwapCallback, IUnlockCallback, DeployUtils {
     }
 
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external override {
+        _callback(amount0Delta, amount1Delta, data);
+    }
+
+    function pancakeV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external override {
         _callback(amount0Delta, amount1Delta, data);
     }
 
