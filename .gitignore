@@ -13,6 +13,8 @@ out/
 # Docs
 docs/
 notes
+notes.automanager
+notes.pancake
 
 # Dotenv file
 .env
