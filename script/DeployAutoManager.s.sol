@@ -2,7 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Script} from "forge-std/Script.sol";
-import {HelperConfig} from "./HelperConfig.s.sol";
+import {AutoManagerHelperConfig} from "./AutoManagerHelperConfig.s.sol";
 import {AutoManager} from "../src/AutoManager.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
@@ -10,8 +10,8 @@ import {IOracle} from "../src/interfaces/IOracle.sol";
 
 
 contract DeployAutoManager is Script {
-    function run() external returns (address, HelperConfig) {
-        HelperConfig helperConfig = new HelperConfig();
+    function run() external returns (address, AutoManagerHelperConfig) {
+        AutoManagerHelperConfig helperConfig = new AutoManagerHelperConfig();
 
         (
             address positionManager,
