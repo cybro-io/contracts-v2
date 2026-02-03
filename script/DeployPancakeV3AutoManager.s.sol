@@ -3,12 +3,12 @@ pragma solidity 0.8.30;
 
 import {Script} from "forge-std/Script.sol";
 import {AutoManagerHelperConfig} from "./AutoManagerHelperConfig.s.sol";
-import {UniswapV3AutoManager} from "../src/UniswapV3AutoManager.sol";
+import {PancakeV3AutoManager} from "../src/PancakeV3AutoManager.sol";
 import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
 
-contract DeployAutoManager is Script {
+contract DeployPancakeV3AutoManager is Script {
     function run() external returns (address, AutoManagerHelperConfig) {
         AutoManagerHelperConfig helperConfig = new AutoManagerHelperConfig();
 
@@ -23,7 +23,7 @@ contract DeployAutoManager is Script {
 
         vm.startBroadcast(deployerKey);
 
-        UniswapV3AutoManager autoLPManager = new UniswapV3AutoManager(
+        PancakeV3AutoManager autoLPManager = new PancakeV3AutoManager(
             INonfungiblePositionManager(positionManager),
             IProtocolFeeCollector(protocolFeeCollector),
             IOracle(aaveOracle),
