@@ -4,7 +4,6 @@ pragma solidity 0.8.30;
 import {Script} from "forge-std/Script.sol";
 import {ProtocolFeeCollector} from "../src/ProtocolFeeCollector.sol";
 
-
 contract DeployProtocolFeeCollector is Script {
     function run() external returns (address) {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
@@ -15,12 +14,7 @@ contract DeployProtocolFeeCollector is Script {
         uint256 depositFee = vm.envUint("DEPOSIT_FEE");
         address admin = vm.envAddress("ADMIN_ADDRESS");
 
-        ProtocolFeeCollector protocolFeeCollector = new ProtocolFeeCollector(
-            liquidityFee,
-            feesFee,
-            depositFee,
-            admin
-        );
+        ProtocolFeeCollector protocolFeeCollector = new ProtocolFeeCollector(liquidityFee, feesFee, depositFee, admin);
 
         vm.stopBroadcast();
         return address(protocolFeeCollector);
