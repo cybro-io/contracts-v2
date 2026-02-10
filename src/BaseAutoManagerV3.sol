@@ -323,9 +323,27 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
      */
     function _checkPriceManipulation(PoolInfo memory poolInfo) internal view {
         uint256 trustedSqrtPrice = _getTrustedSqrtPrice(poolInfo);
-        uint256 deviation =
-            FullMath.mulDiv(getCurrentSqrtPriceX96(poolInfo.pool) ** 2, PRECISION, trustedSqrtPrice ** 2);
-        require((deviation > PRECISION - maxDeviation) && (deviation < PRECISION + maxDeviation), PriceManipulation());
+        uint256 currentSqrtPrice = getCurrentSqrtPriceX96(poolInfo.pool);
+
+        // deviation = (current^2 / trusted^2) * PRECISION
+        // Use Uniswap's pattern to avoid overflow while keeping max precision when possible.
+        uint256 deviation;
+        if (currentSqrtPrice <= type(uint128).max && trustedSqrtPrice <= type(uint128).max) {
+            // Q192 exact squaring (best precision)
+            uint256 currentRatioX192 = currentSqrtPrice * currentSqrtPrice;
+            uint256 trustedRatioX192 = trustedSqrtPrice * trustedSqrtPrice;
+            deviation = FullMath.mulDiv(currentRatioX192, uint256(PRECISION), trustedRatioX192);
+        } else {
+            // Q128 squaring via mulDiv to avoid overflow: floor(current^2 / 2^64)
+            uint256 currentRatioX128 = FullMath.mulDiv(currentSqrtPrice, currentSqrtPrice, uint256(1) << 64);
+            uint256 trustedRatioX128 = FullMath.mulDiv(trustedSqrtPrice, trustedSqrtPrice, uint256(1) << 64);
+            deviation = FullMath.mulDiv(currentRatioX128, uint256(PRECISION), trustedRatioX128);
+        }
+
+        require(
+            deviation > uint256(PRECISION) - maxDeviation && deviation < uint256(PRECISION) + maxDeviation,
+            PriceManipulation()
+        );
     }
 
     /**
@@ -393,11 +411,29 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
                 revert NoPrice();
             } else {
                 uint256 twap = _getTwap(poolInfo.pool);
-                price0 = FullMath.mulDiv(FullMath.mulDiv(decimals0, twap * twap, 2 ** 192), price1, decimals1);
+                // price0 = (decimals0 * twap^2 / 2^192) * price1 / decimals1
+                if (twap <= type(uint128).max) {
+                    uint256 ratioX192 = twap * twap;
+                    uint256 twapFactor0 = FullMath.mulDiv(decimals0, ratioX192, uint256(1) << 192);
+                    price0 = FullMath.mulDiv(twapFactor0, price1, decimals1);
+                } else {
+                    uint256 ratioX128 = FullMath.mulDiv(twap, twap, uint256(1) << 64);
+                    uint256 twapFactor0 = FullMath.mulDiv(decimals0, ratioX128, uint256(1) << 128);
+                    price0 = FullMath.mulDiv(twapFactor0, price1, decimals1);
+                }
             }
         } else if (price1 == 0) {
             uint256 twap = _getTwap(poolInfo.pool);
-            price1 = FullMath.mulDiv(FullMath.mulDiv(decimals1, 2 ** 192, twap * twap), price0, decimals0);
+            // price1 = (decimals1 * 2^192 / twap^2) * price0 / decimals0
+            if (twap <= type(uint128).max) {
+                uint256 ratioX192 = twap * twap;
+                uint256 twapFactor1 = FullMath.mulDiv(decimals1, uint256(1) << 192, ratioX192);
+                price1 = FullMath.mulDiv(twapFactor1, price0, decimals0);
+            } else {
+                uint256 ratioX128 = FullMath.mulDiv(twap, twap, uint256(1) << 64);
+                uint256 twapFactor1 = FullMath.mulDiv(decimals1, uint256(1) << 128, ratioX128);
+                price1 = FullMath.mulDiv(twapFactor1, price0, decimals0);
+            }
         }
     }
 }
