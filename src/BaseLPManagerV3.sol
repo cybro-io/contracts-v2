@@ -538,7 +538,13 @@ abstract contract BaseLPManagerV3 {
      * @return amount1In0 Equivalent amount in token0 units
      */
     function _oneToZero(uint256 currentPrice, uint256 amount1) internal pure returns (uint256 amount1In0) {
-        return FullMath.mulDiv(amount1, 2 ** 192, currentPrice * currentPrice);
+        if (currentPrice <= type(uint128).max) {
+            uint256 ratioX192 = currentPrice * currentPrice;
+            return FullMath.mulDiv(amount1, uint256(1) << 192, ratioX192);
+        } else {
+            uint256 ratioX128 = FullMath.mulDiv(currentPrice, currentPrice, uint256(1) << 64);
+            return FullMath.mulDiv(amount1, uint256(1) << 128, ratioX128);
+        }
     }
 
     /**
@@ -548,7 +554,13 @@ abstract contract BaseLPManagerV3 {
      * @return amount0In1 Equivalent amount in token1 units
      */
     function _zeroToOne(uint256 currentPrice, uint256 amount0) internal pure returns (uint256 amount0In1) {
-        return FullMath.mulDiv(amount0, currentPrice * currentPrice, 2 ** 192);
+        if (currentPrice <= type(uint128).max) {
+            uint256 ratioX192 = currentPrice * currentPrice;
+            return FullMath.mulDiv(amount0, ratioX192, uint256(1) << 192);
+        } else {
+            uint256 ratioX128 = FullMath.mulDiv(currentPrice, currentPrice, uint256(1) << 64);
+            return FullMath.mulDiv(amount0, ratioX128, uint256(1) << 128);
+        }
     }
 
     /**
