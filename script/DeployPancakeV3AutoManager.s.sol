@@ -8,6 +8,7 @@ import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/inter
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
 
+
 contract DeployPancakeV3AutoManager is Script {
     function run() external returns (address, AutoManagerHelperConfig) {
         AutoManagerHelperConfig helperConfig = new AutoManagerHelperConfig();
