@@ -69,6 +69,13 @@ contract AutoManagerV4Test is Test, DeployUtils {
         uint256 amount1;
     }
 
+    struct CreatePositionResult {
+        uint256 positionId;
+        uint128 liquidity;
+        uint256 amount0;
+        uint256 amount1;
+    }
+
     InteractionInfo public interactionInfo;
 
     function setUp() public virtual {
@@ -199,13 +206,13 @@ contract AutoManagerV4Test is Test, DeployUtils {
     }
 
     function _cast(BaseLPManagerV4.PoolKey memory key) internal pure returns (UniswapPoolKey memory uKey) {
-        assembly {
+        assembly ("memory-safe") {
             uKey := key
         }
     }
 
     function _cast(UniswapPoolKey memory uKey) internal pure returns (BaseLPManagerV4.PoolKey memory key) {
-        assembly {
+        assembly ("memory-safe") {
             key := uKey
         }
     }
@@ -280,19 +287,7 @@ contract AutoManagerV4Test is Test, DeployUtils {
             vm.revertToState(snapshotId);
         }
 
-        (uint256 positionId, uint128 liquidity, uint256 amount0, uint256 amount1) = lpManager.createPosition{
-            value: interactionInfo.poolKey.currency0 == address(0)
-                ? amountIn0_
-                : interactionInfo.poolKey.currency1 == address(0) ? amountIn1_ : 0
-        }(
-            interactionInfo.poolKey,
-            amountIn0_,
-            amountIn1_,
-            interactionInfo.tickLower,
-            interactionInfo.tickUpper,
-            interactionInfo.from,
-            minLiquidity_
-        );
+        CreatePositionResult memory res = _createPosition(amountIn0_, amountIn1_, minLiquidity_);
 
         vm.stopPrank();
 
@@ -309,14 +304,14 @@ contract AutoManagerV4Test is Test, DeployUtils {
             vm.assertTrue(found, "PositionCreated not emitted");
         }
 
-        interactionInfo.positionId = positionId;
-        console.log("positionId", positionId);
-        console.log("liquidity", liquidity);
-        vm.assertGt(liquidity, 0);
-        vm.assertEq(IERC721(address(positionManager)).ownerOf(positionId), recipient_);
-        _assertApproxEqLiquidity(previewCreatePosition.liquidity, liquidity);
-        _assertApproxEqUint(previewCreatePosition.amount0, amount0);
-        _assertApproxEqUint(previewCreatePosition.amount1, amount1);
+        interactionInfo.positionId = res.positionId;
+        console.log("positionId", res.positionId);
+        console.log("liquidity", res.liquidity);
+        vm.assertGt(res.liquidity, 0);
+        vm.assertEq(IERC721(address(positionManager)).ownerOf(res.positionId), recipient_);
+        _assertApproxEqLiquidity(previewCreatePosition.liquidity, res.liquidity);
+        _assertApproxEqUint(previewCreatePosition.amount0, res.amount0);
+        _assertApproxEqUint(previewCreatePosition.amount1, res.amount1);
 
         {
             uint256 fee0 = protocolFeeCollector.calculateProtocolFee(amountIn0_, ProtocolFeeCollector.FeeType.LIQUIDITY);
@@ -324,6 +319,25 @@ contract AutoManagerV4Test is Test, DeployUtils {
             vm.assertEq(_getBalance(interactionInfo.poolKey.currency0, address(protocolFeeCollector)), fee0);
             vm.assertEq(_getBalance(interactionInfo.poolKey.currency1, address(protocolFeeCollector)), fee1);
         }
+    }
+
+    function _createPosition(uint256 amountIn0_, uint256 amountIn1_, uint256 minLiquidity_)
+        internal
+        returns (CreatePositionResult memory res)
+    {
+        uint256 value = interactionInfo.poolKey.currency0 == address(0)
+            ? amountIn0_
+            : interactionInfo.poolKey.currency1 == address(0) ? amountIn1_ : 0;
+
+        (res.positionId, res.liquidity, res.amount0, res.amount1) = lpManager.createPosition{value: value}(
+            interactionInfo.poolKey,
+            amountIn0_,
+            amountIn1_,
+            interactionInfo.tickLower,
+            interactionInfo.tickUpper,
+            interactionInfo.from,
+            minLiquidity_
+        );
     }
 
     function _getSignatureClaimFees(AutoManagerV4.AutoClaimRequest memory request) public view returns (bytes memory) {

@@ -54,13 +54,13 @@ abstract contract LPManagerV4Test is Test, DeployUtils {
     }
 
     function _cast(BaseLPManagerV4.PoolKey memory key) internal pure returns (UniswapPoolKey memory uKey) {
-        assembly {
+        assembly ("memory-safe") {
             uKey := key
         }
     }
 
     function _cast(UniswapPoolKey memory uKey) internal pure returns (BaseLPManagerV4.PoolKey memory key) {
-        assembly {
+        assembly ("memory-safe") {
             key := uKey
         }
     }

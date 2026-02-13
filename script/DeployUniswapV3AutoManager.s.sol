@@ -8,7 +8,6 @@ import {INonfungiblePositionManager} from "@uniswap/v3-periphery/contracts/inter
 import {IProtocolFeeCollector} from "../src/interfaces/IProtocolFeeCollector.sol";
 import {IOracle} from "../src/interfaces/IOracle.sol";
 
-
 contract DeployUniswapV3AutoManager is Script {
     function run() external returns (address, AutoManagerHelperConfig) {
         AutoManagerHelperConfig helperConfig = new AutoManagerHelperConfig();
@@ -25,8 +24,8 @@ contract DeployUniswapV3AutoManager is Script {
         vm.startBroadcast(deployerKey);
 
         UniswapV3AutoManager autoLPManager = new UniswapV3AutoManager(
-            INonfungiblePositionManager(positionManager), 
-            IProtocolFeeCollector(protocolFeeCollector), 
+            INonfungiblePositionManager(positionManager),
+            IProtocolFeeCollector(protocolFeeCollector),
             IOracle(aaveOracle),
             admin,
             autoManager

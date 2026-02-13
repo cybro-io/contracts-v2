@@ -25,8 +25,8 @@ contract DeployPancakeV3AutoManager is Script {
         vm.startBroadcast(deployerKey);
 
         PancakeV3AutoManager autoLPManager = new PancakeV3AutoManager(
-            INonfungiblePositionManager(positionManager), 
-            IProtocolFeeCollector(protocolFeeCollector), 
+            INonfungiblePositionManager(positionManager),
+            IProtocolFeeCollector(protocolFeeCollector),
             IOracle(aaveOracle),
             admin,
             autoManager
