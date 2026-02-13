@@ -18,8 +18,8 @@ contract AutoManagerHelperConfig is Script {
     constructor() {
         if (block.chainid == 42161) {
             activeNetworkConfig = getArbitrumConfig();
-        } else if (block.chainid == 130) {
-            activeNetworkConfig = getUniConfig();
+        } else if (block.chainid == 56) {
+            activeNetworkConfig = getBscConfig();
         } else if (block.chainid == 8453) {
             activeNetworkConfig = getBaseConfig();
         } else if (block.chainid == 1) {
@@ -49,11 +49,11 @@ contract AutoManagerHelperConfig is Script {
         });
     }
 
-    function getUniConfig() public view returns (NetworkConfig memory uniNetworkConfig) {
-        uniNetworkConfig = NetworkConfig({
-            positionManager: vm.envAddress("UNI_POSITION_MANAGER"),
-            protocolFeeCollector: vm.envAddress("UNI_PROTOCOL_FEE_COLLECTOR"),
-            aaveOracle: vm.envAddress("UNI_AAVE_ORACLE"),
+    function getBscConfig() public view returns (NetworkConfig memory bscNetworkConfig) {
+        bscNetworkConfig = NetworkConfig({
+            positionManager: vm.envAddress("BSC_POSITION_MANAGER"),
+            protocolFeeCollector: vm.envAddress("BSC_PROTOCOL_FEE_COLLECTOR"),
+            aaveOracle: vm.envAddress("BSC_AAVE_ORACLE"),
             admin: vm.envAddress("ADMIN_ADDRESS"),
             autoManager: vm.envAddress("AUTO_MANAGER_ADDRESS"),
             deployerKey: vm.envUint("PRIVATE_KEY")
