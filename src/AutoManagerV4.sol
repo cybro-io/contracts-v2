@@ -190,6 +190,9 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLAIM_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
+        if (request.transferType != TransferInfoInToken.BOTH) {
+            _checkPriceManipulation(_getPositionContext(request.positionId).poolKey);
+        }
         _claimFees(request.positionId, request.recipient, request.transferType);
         lastAutoClaim[request.positionId] = block.timestamp;
     }
@@ -207,6 +210,9 @@ contract AutoManagerV4 is BaseLPManagerV4, EIP712, AccessControl {
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLOSE_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
+        if (request.transferType != TransferInfoInToken.BOTH) {
+            _checkPriceManipulation(_getPositionContext(request.positionId).poolKey);
+        }
         _withdrawAndChargeFee(request.positionId, PRECISION, request.recipient, request.transferType);
     }
 
