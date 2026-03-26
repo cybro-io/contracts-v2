@@ -551,7 +551,7 @@ contract AutoManagerV4TestBaseChain is AutoManagerV4Test {
 
     function _test(uint256 amountIn0, uint256 amountIn1) public {
         _testGetters();
-        (uint160 currentPrice, int24 currentTick,,) = poolManager.getSlot0(_cast(key).toId());
+        (, int24 currentTick,,) = poolManager.getSlot0(_cast(key).toId());
         int24 tickSpacing = key.tickSpacing;
 
         currentTick -= currentTick % tickSpacing;

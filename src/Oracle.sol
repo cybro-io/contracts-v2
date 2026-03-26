@@ -18,6 +18,14 @@ contract Oracle is AccessControl, IOracle {
     /// @notice Thrown when no price is available for an asset
     error NoPrice();
 
+    /* ============ EVENTS ============ */
+
+    /**
+     * @notice Emitted when the primary Oracle is set
+     * @param primaryOracle Address of the primary Oracle
+     */
+    event PrimaryOracleSet(address indexed primaryOracle);
+
     /* ============ CONSTANTS ============ */
 
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
@@ -42,6 +50,7 @@ contract Oracle is AccessControl, IOracle {
         wrappedNative = _wrappedNative;
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(MANAGER_ROLE, _admin);
+        emit PrimaryOracleSet(address(_primaryOracle));
     }
 
     /* ============ EXTERNAL VIEW FUNCTIONS ============ */
@@ -126,6 +135,7 @@ contract Oracle is AccessControl, IOracle {
      */
     function setPrimaryOracle(IAaveOracle _primaryOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         primaryOracle = _primaryOracle;
+        emit PrimaryOracleSet(address(_primaryOracle));
     }
 
     /**

@@ -4,6 +4,10 @@ pragma solidity ^0.8.29;
 import {IChainlinkOracle} from "../interfaces/IChainlinkOracle.sol";
 
 library OracleData {
+
+    /// @notice Error thrown when a price is stale
+    error StalePrice();
+
     /// @notice Error thrown when a round is not complete
     error RoundNotComplete();
 
@@ -16,9 +20,10 @@ library OracleData {
      * @return The price
      */
     function getPrice(IChainlinkOracle oracle) public view returns (uint256) {
-        (, int256 price,, uint256 updatedAt,) = oracle.latestRoundData();
+        (uint80 roundId, int256 price,, uint256 updatedAt, uint80 answeredInRound) = oracle.latestRoundData();
         require(updatedAt != 0, RoundNotComplete());
         require(price > 0, ChainlinkPriceReportingZero());
+        require(answeredInRound >= roundId, StalePrice());
 
         return uint256(price);
     }

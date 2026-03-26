@@ -93,6 +93,14 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
     /// @notice Thrown when the price is not available
     error NoPrice();
 
+    /* ============ EVENTS ============ */
+
+    /**
+     * @notice Emitted when the Oracle is set
+     * @param oracle Address of the Oracle that was set
+     */
+    event OracleSet(address indexed oracle);
+
     /* ============ CONSTANTS ============ */
 
     /// @notice Maximum allowed deviation from the trusted price (10%)
@@ -137,7 +145,10 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
         address admin,
         address autoManager
     ) EIP712("AutoManager", "1") BaseLPManagerV3(_positionManager, _protocolFeeCollector) {
-        oracle = _oracle;
+        if (address(_oracle) != address(0)) {
+            oracle = _oracle;
+            emit OracleSet(address(_oracle));
+        }
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(AUTO_MANAGER_ROLE, autoManager);
     }
@@ -150,6 +161,7 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
      */
     function setOracle(IOracle _oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         oracle = _oracle;
+        emit OracleSet(address(_oracle));
     }
 
     /**
