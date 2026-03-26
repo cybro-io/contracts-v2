@@ -509,11 +509,13 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
         amount1 = _collectProtocolFee(key.currency1, amount1In, feeType);
         if (transferInfoInToken != TransferInfoInToken.BOTH) {
             if (transferInfoInToken == TransferInfoInToken.TOKEN0) {
-                amount0 += _swap(false, amount1, key);
-                amount1 = 0;
+                (uint256 consumed1, uint256 out0) = _swap(false, amount1, key);
+                amount0 += out0;
+                amount1 -= consumed1;
             } else {
-                amount1 += _swap(true, amount0, key);
-                amount0 = 0;
+                (uint256 consumed0, uint256 out1) = _swap(true, amount0, key);
+                amount1 += out1;
+                amount0 -= consumed0;
             }
         }
 
@@ -689,11 +691,21 @@ abstract contract BaseLPManagerV4 is IUnlockCallback {
      * @param zeroForOne true for token0->token1 swap, false for token1->token0
      * @param amount Exact input amount
      * @param key Pool key
-     * @return out Exact output amount received
+     * @return amountInConsumed Exact input amount consumed by the pool
+     * @return amountOut Exact output amount received
      */
-    function _swap(bool zeroForOne, uint256 amount, PoolKey memory key) internal returns (uint256 out) {
+    function _swap(bool zeroForOne, uint256 amount, PoolKey memory key)
+        internal
+        returns (uint256 amountInConsumed, uint256 amountOut)
+    {
         (int256 amount0, int256 amount1) = _swapWithPriceLimit(zeroForOne, amount, key, 0);
-        out = uint256(zeroForOne ? amount1 : amount0);
+        if (zeroForOne) {
+            amountInConsumed = uint256(-amount0);
+            amountOut = uint256(amount1);
+        } else {
+            amountInConsumed = uint256(-amount1);
+            amountOut = uint256(amount0);
+        }
     }
 
     /**
