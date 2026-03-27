@@ -45,7 +45,7 @@ contract DeployUtils is StdCheats {
     /* ========== CACHED BLOCKIDS ========== */
 
     uint256 lastCachedBlockid_ARBITRUM = 394596223;
-    uint256 lastCachedBlockid_BASE = 37467570;
+    uint256 lastCachedBlockid_BASE = 43875287;
     uint256 lastCachedBlockid_UNICHAIN = 30985995;
 
     /* ========== ASSETS ========== */

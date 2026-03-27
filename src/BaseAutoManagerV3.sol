@@ -93,18 +93,26 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
     /// @notice Thrown when the price is not available
     error NoPrice();
 
+    /* ============ EVENTS ============ */
+
+    /**
+     * @notice Emitted when the Oracle is set
+     * @param oracle Address of the Oracle that was set
+     */
+    event OracleSet(address indexed oracle);
+
     /* ============ CONSTANTS ============ */
 
     /// @notice Maximum allowed deviation from the trusted price (10%)
     uint32 public constant maxDeviation = 1000;
 
     bytes32 public constant AUTO_CLAIM_REQUEST_TYPEHASH = keccak256(
-        "AutoClaimRequest(uint256 positionId,uint256 initialTimestamp,uint256 claimInterval,uint256 claimMinAmountUsd,address recipient,uint8 transferType, uint256 nonce)"
+        "AutoClaimRequest(uint256 positionId,uint256 initialTimestamp,uint256 claimInterval,uint256 claimMinAmountUsd,address recipient,uint8 transferType,uint256 nonce)"
     );
     bytes32 public constant AUTO_REBALANCE_REQUEST_TYPEHASH =
-        keccak256("AutoRebalanceRequest(uint256 positionId,uint160 triggerLower,uint160 triggerUpper, uint256 nonce)");
+        keccak256("AutoRebalanceRequest(uint256 positionId,uint160 triggerLower,uint160 triggerUpper,uint256 nonce)");
     bytes32 public constant AUTO_CLOSE_REQUEST_TYPEHASH = keccak256(
-        "AutoCloseRequest(uint256 positionId,uint160 triggerPrice,bool belowOrAbove,address recipient,uint8 transferType, uint256 nonce)"
+        "AutoCloseRequest(uint256 positionId,uint160 triggerPrice,bool belowOrAbove,address recipient,uint8 transferType,uint256 nonce)"
     );
 
     /// @notice Role identifier allowed to execute automated flows (`auto*` functions)
@@ -137,7 +145,10 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
         address admin,
         address autoManager
     ) EIP712("AutoManager", "1") BaseLPManagerV3(_positionManager, _protocolFeeCollector) {
-        oracle = _oracle;
+        if (address(_oracle) != address(0)) {
+            oracle = _oracle;
+            emit OracleSet(address(_oracle));
+        }
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(AUTO_MANAGER_ROLE, autoManager);
     }
@@ -150,6 +161,7 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
      */
     function setOracle(IOracle _oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         oracle = _oracle;
+        emit OracleSet(address(_oracle));
     }
 
     /**
@@ -173,6 +185,9 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLAIM_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
+        if (request.transferType != TransferInfoInToken.BOTH) {
+            _checkPriceManipulation(_getPositionContext(request.positionId).poolInfo);
+        }
         _claimFees(request.positionId, request.recipient, request.transferType);
         lastAutoClaim[request.positionId] = block.timestamp;
     }
@@ -187,6 +202,9 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
         _validateSignatureFromOwner(
             _hashTypedDataV4(keccak256(abi.encode(AUTO_CLOSE_REQUEST_TYPEHASH, request))), signature, request.positionId
         );
+        if (request.transferType != TransferInfoInToken.BOTH) {
+            _checkPriceManipulation(_getPositionContext(request.positionId).poolInfo);
+        }
         _withdrawAndChargeFee(request.positionId, PRECISION, request.recipient, request.transferType);
     }
 
@@ -214,9 +232,15 @@ abstract contract BaseAutoManagerV3 is BaseLPManagerV3, EIP712, AccessControl {
             int24 tickSpacing = IUniswapV3Pool(ctx.poolInfo.pool).tickSpacing();
             int24 widthTicks = ctx.tickUpper - ctx.tickLower;
             newLower = currentTick - widthTicks / 2;
-            newLower -= newLower % tickSpacing;
-            newUpper = currentTick + widthTicks / 2;
-            newUpper -= newUpper % tickSpacing;
+            int24 remainder = newLower % tickSpacing;
+            if (remainder < 0) {
+                remainder += tickSpacing;
+            }
+            newLower -= remainder;
+            if (newLower + widthTicks <= currentTick) {
+                newLower += tickSpacing;
+            }
+            newUpper = newLower + widthTicks;
         }
         _moveRange(request.positionId, newLower, newUpper, owner, 0, owner);
     }

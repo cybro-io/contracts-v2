@@ -520,11 +520,13 @@ abstract contract BaseLPManagerV3 {
         amount1 = _collectProtocolFee(poolInfo.token1, amount1In, feeType);
         if (transferInfoInToken != TransferInfoInToken.BOTH) {
             if (transferInfoInToken == TransferInfoInToken.TOKEN0) {
-                amount0 += _swap(false, amount1, poolInfo);
-                amount1 = 0;
+                (uint256 consumed1, uint256 out0) = _swap(false, amount1, poolInfo);
+                amount0 += out0;
+                amount1 -= consumed1;
             } else {
-                amount1 += _swap(true, amount0, poolInfo);
-                amount0 = 0;
+                (uint256 consumed0, uint256 out1) = _swap(true, amount0, poolInfo);
+                amount1 += out1;
+                amount0 -= consumed0;
             }
         }
         if (amount0 > 0) IERC20Metadata(poolInfo.token0).safeTransfer(recipient, amount0);
@@ -687,12 +689,21 @@ abstract contract BaseLPManagerV3 {
      * @param zeroForOne true for token0->token1 swap, false for token1->token0
      * @param amount Exact input amount
      * @param poolInfo Pool metadata (addresses and fee)
-     * @return out Exact output amount received
+     * @return amountInConsumed Exact input amount consumed by the pool
+     * @return amountOut Exact output amount received
      */
-    function _swap(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo) internal returns (uint256 out) {
+    function _swap(bool zeroForOne, uint256 amount, PoolInfo memory poolInfo)
+        internal
+        returns (uint256 amountInConsumed, uint256 amountOut)
+    {
         (int256 amount0, int256 amount1) = _swapWithPriceLimit(zeroForOne, amount, poolInfo, 0);
-        // Output amount is the negative leg (exact input convention)
-        out = uint256(-(zeroForOne ? amount1 : amount0));
+        if (zeroForOne) {
+            amountInConsumed = uint256(amount0);
+            amountOut = uint256(-amount1);
+        } else {
+            amountInConsumed = uint256(amount1);
+            amountOut = uint256(-amount0);
+        }
     }
 
     /**
